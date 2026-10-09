@@ -7,7 +7,7 @@
  * One pi writes a conversation at a time (lock.json); a second pi may open it read-only or take it over.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -39,6 +39,8 @@ let flagConsumed = false; // --mem applies to the first session only; a session 
 let warnedForced = false;
 
 const lockFile = (dir: string) => join(dir, "lock.json");
+/** MEM_TRACE=<file>: append one line per hook (debugging the turn assembly). MEM_DEBUG=<file>: dump the last provider payload. */
+const trace = (line: string) => { if (process.env.MEM_TRACE) appendFileSync(process.env.MEM_TRACE, `${line}\n`); };
 const readLock = (dir: string): { pid: number; token: string; cwd?: string; at?: string } | undefined => {
 	try { return JSON.parse(readFileSync(lockFile(dir), "utf8")); } catch { return undefined; }
 };
@@ -282,8 +284,8 @@ export default function endless(pi: ExtensionAPI) {
 		prevExchange = previousExchange(a);
 	};
 
-	const turnState = (a: Active, ctx: ExtensionContext, note = "") =>
-		`<turn>\nnow: ${new Date().toString().slice(0, 33)} · cwd: ${ctx.cwd}${a.readOnly ? " · memory is read-only in this session (nothing said here is logged)" : ""}${note ? `\n${note}` : ""}\n</turn>`;
+	const turnState = (a: Active, ctx: ExtensionContext) =>
+		`<turn>\nnow: ${new Date().toString().slice(0, 33)} · cwd: ${ctx.cwd}${a.readOnly ? " · memory is read-only in this session (nothing said here is logged)" : ""}\n</turn>`;
 
 	/** Messages for the model: the first one carries [view][previous exchange][turn state], the rest of the run follows as is. */
 	const buildContext = (a: Active, ctx: ExtensionContext): AgentMessage[] => {
@@ -300,7 +302,9 @@ export default function endless(pi: ExtensionAPI) {
 	const runBytes = () => run.reduce((s, m) => s + bytes(textOf((m as { content?: unknown }).content)), 0);
 	const reviewIfLong = (a: Active, ctx: ExtensionContext): boolean => {
 		const budget = Math.max(150_000, (ctx.model?.contextWindow ?? 128_000) * 2); // ~ bytes; mixed text runs 2-4 bytes per token
-		if (runBytes() < budget) return false;
+		const used = runBytes();
+		trace(`review bytes=${used} budget=${budget}`);
+		if (used < budget) return false;
 		flush(a);
 		const task = run.find((m) => m.role === "user");
 		const taskText = task ? textOf(task.content) : "";
@@ -312,7 +316,7 @@ export default function endless(pi: ExtensionAPI) {
 			timestamp: Date.now(),
 			content: [{
 				type: "text",
-				text: turnState(a, ctx, `This turn ran long, so its context was rebuilt from memory (rebuild #${reviews}): everything you did so far in this turn is in the last lines of the view above; zoom them for exact details. Continue the task without repeating finished steps.${taskText && bytes(taskText) <= 4000 ? `\nThe task of this turn, verbatim: ${taskText}` : ""}`),
+				text: `This turn ran long, so its context was rebuilt from memory (rebuild #${reviews}): everything you did so far in this turn is in the last lines of the view above; zoom them for exact details. Continue the task without repeating finished steps.${taskText && bytes(taskText) <= 4000 ? `\nThe task of this turn, verbatim: ${taskText}` : ""}`,
 			}],
 		}];
 		logged = 1; // the rebuild note is for the model only, never logged
@@ -343,6 +347,7 @@ export default function endless(pi: ExtensionAPI) {
 
 	const DEFAULT_PREAMBLE = "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 	pi.on("before_agent_start", (event, ctx) => {
+		trace("before_agent_start");
 		if (!active) return;
 		event.systemPromptOptions.customPrompt = PROMPT;
 		startRun(active);
@@ -356,7 +361,8 @@ export default function endless(pi: ExtensionAPI) {
 	pi.on("agent_start", () => { if (active && !runStarted) startRun(active); });
 
 	pi.on("message_end", (event, ctx) => {
-		if (!active || !runStarted) return;
+		trace(`message_end ${event.message.role} runStarted=${runStarted} view=${view !== undefined}`);
+		if (!active || !runStarted || event.message.role === "system") return; // the system entry is pi's prompt, not a message
 		let message = event.message;
 		// Tool output is capped at CAP characters (head and tail) both in the log and in this turn's context.
 		if (message.role === "toolResult") {
@@ -371,6 +377,7 @@ export default function endless(pi: ExtensionAPI) {
 	});
 
 	pi.on("context", async (_event, ctx) => {
+		trace(`context run=${JSON.stringify(run.map((m) => m.role))}`);
 		const a = active;
 		if (!a) return;
 		if (view === undefined) {

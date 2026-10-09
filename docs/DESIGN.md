@@ -62,7 +62,9 @@ kind：`user` / `pi`（回复）/ `tool`（调用）/ `echo`（结果，截头�
 ## 已知边界
 
 - 压缩器与 turn 不共用 system prompt（配方要共用以吃同一份缓存）；压缩走自己的 `PROMPT`，无工具。
-- 单轮太长：不撞 pi 的 compaction，`context` 里按 run 字节估算（≥ max(150KB, 2×contextWindow)）就从记忆重建上下文接着干——本轮已做的事已在日志和视图末尾，模型可 zoom。
+- 单轮太长：不撞 pi 的 compaction，`context` 里按 run 文本字节估算（≥ max(150KB, 2×contextWindow)）就从记忆重建上下文接着干——本轮已做的事已在日志和视图末尾，模型可 zoom；重建说明只给模型看，不记日志。实测 12 次 cat 45KB 文件的单轮在 270KB 处重建一次后正常收尾。
+- pi 把系统提示词也当 `system` 消息发 message_end：跳过，不进 run、不记日志、不算字节。
+- 调试：`MEM_TRACE=<file>` 每个 hook 一行；`MEM_DEBUG=<file>` 存最后一次请求体。
 - 压缩器挂了：视图里是占位行，`/mem status` 看错误；10 s 一次重试。
 - 图片只记 `[image]`。
 
