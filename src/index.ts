@@ -140,6 +140,18 @@ export default function endless(pi: ExtensionAPI) {
 		}
 		throw new Error("rename pointers loop");
 	};
+	/**
+	 * `/mem open <new>` must create the conversation itself. session_start runs before the new session's setup entry is
+	 * written, then a later session_start (resume) reads the binding and opens with create=false — so by the time that
+	 * binding exists the directory has to be there already; nothing else ever calls open() with create=true for it.
+	 */
+	const ensureConversation = (rawName: string): { name: string; created: boolean } => {
+		if (!/^[\w.-]+$/.test(rawName)) throw new Error(t(`Conversation names are letters, digits, . _ -: ${rawName}`, `对话名只能是字母数字 ._-：${rawName}`));
+		const name = resolveName(rawName);
+		if (existsSync(join(HOME, name))) return { name, created: false };
+		mkdirSync(join(HOME, name), { recursive: true, mode: 0o700 });
+		return { name, created: true };
+	};
 	const lastExchange = (m: Memory): { user: string; reply: string } | undefined => {
 		const log = m.log;
 		let r = -1;
@@ -481,9 +493,12 @@ export default function endless(pi: ExtensionAPI) {
 					if (name === NEW) name = (await ctx.ui.input(t("Name", "对话名"), "main"))?.trim() ?? "";
 					if (!name) return;
 					if (!ctx.isIdle()) throw new Error(t("Wait for the agent to finish first", "等 agent 停下来再换对话"));
+					const { name: conversation, created } = ensureConversation(name);
+					name = conversation;
 					if (active?.name === name) { ctx.ui.notify(t(`${name} is already open`, `${name} 已经打开`), "info"); return; }
 					// A fresh session bound to the conversation (this one stays, /resume brings it back); session_start opens it.
-					await ctx.newSession({ setup: async (sm) => { sm.appendCustomEntry(BINDING, { name }); } });
+					const { cancelled } = await ctx.newSession({ setup: async (sm) => { sm.appendCustomEntry(BINDING, { name }); } });
+					if (cancelled && created) rmSync(join(HOME, name), { recursive: true, force: true }); // no phantom conversation left behind
 					return;
 				}
 				if (cmd === "close") {
