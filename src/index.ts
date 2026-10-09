@@ -130,7 +130,15 @@ export default function endless(pi: ExtensionAPI) {
 			return (settings.packages ?? []).map((p) => (typeof p === "string" ? p : ((p as { source?: string }).source ?? ""))).filter((s) => KNOWN_OVERLAPS.some((c) => s.includes(c)));
 		} catch { return []; }
 	};
-	const listConversations = () => (existsSync(HOME) ? readdirSync(HOME, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort() : []);
+	const listConversations = () => (existsSync(HOME) ? readdirSync(HOME, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith(".")).map((d) => d.name).sort() : []);
+	/** Deleting never destroys: the conversation moves to ~/.pi/memory/.trash/<name>-<time>. */
+	const trash = (name: string) => {
+		const bin = join(HOME, ".trash");
+		mkdirSync(bin, { recursive: true, mode: 0o700 });
+		const to = join(bin, `${name}-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+		renameSync(join(HOME, name), to);
+		return to;
+	};
 	/** After a rename the old name holds a pointer file {renamedTo}, so old session bindings and habits follow. */
 	const resolveName = (name: string): string => {
 		for (let hop = 0; hop < 5; hop++) {
@@ -185,7 +193,7 @@ export default function endless(pi: ExtensionAPI) {
 		if (!readOnly) atomicWrite(lockFile(dir), JSON.stringify({ pid: process.pid, token, session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, at: new Date().toISOString() }));
 		const config = loadConfig(dir, ctx);
 		const a: Active = { name, dir, config, token, readOnly, memory: undefined as unknown as Memory, usage: { calls: 0, input: 0, output: 0, cacheRead: 0, cost: 0 } };
-		a.memory = new Memory(dir, compressor(ctx, () => a), (s) => ctx.ui.notify(s, "warning"));
+		a.memory = new Memory(dir, compressor(ctx, () => a), (s) => ctx.ui.notify(s, "warning"), { readOnly });
 		active = a;
 		fault = undefined;
 		a.memory.onChange(() => status(ctx));
@@ -200,13 +208,16 @@ export default function endless(pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") ctx.ui.notify(`mem ${name}${readOnly ? " (read-only)" : ""} · ${a.memory.T} messages · ${banner.compactor}`, "info");
 	};
 
-	const close = async () => {
+	const close = async (pruneEmpty = true) => {
 		const a = active;
 		if (!a) return;
 		active = undefined;
 		try { flush(a); } catch { /* closing anyway */ }
 		await a.memory.close();
-		if (!a.readOnly && readLock(a.dir)?.token === a.token) rmSync(lockFile(a.dir), { force: true });
+		if (!a.readOnly && readLock(a.dir)?.token === a.token) {
+			rmSync(lockFile(a.dir), { force: true });
+			if (pruneEmpty && a.memory.T === 0) rmSync(a.dir, { recursive: true, force: true }); // never used: no reason to keep a mistyped name around
+		}
 		pi.setActiveTools(pi.getActiveTools().filter((x) => !TOOLS.includes(x)));
 		run = []; logged = 0; view = undefined; runStarted = false; prevExchange = ""; reviews = 0;
 	};
@@ -242,6 +253,7 @@ export default function endless(pi: ExtensionAPI) {
 		while (logged < run.length) {
 			if (readLock(a.dir)?.token !== a.token) {
 				a.readOnly = true;
+				a.memory.freeze();
 				fault = t(`${a.name} was taken over by another pi; this session is now read-only`, `${a.name} 被另一个 pi 接管了，本会话降为只读`);
 				logged = run.length;
 				throw new Error(fault);
@@ -278,7 +290,7 @@ export default function endless(pi: ExtensionAPI) {
 	};
 
 	/** A very long turn would overflow the model: rebuild the context from memory instead of compacting. The turn's own steps are in the view now (zoomable). */
-	const runBytes = () => run.reduce((s, m) => { const c = (m as { content?: unknown }).content; return s + bytes(typeof c === "string" ? c : JSON.stringify(c ?? "")); }, 0);
+	const runBytes = () => run.reduce((s, m) => s + bytes(textOf((m as { content?: unknown }).content)), 0);
 	const reviewIfLong = (a: Active, ctx: ExtensionContext): boolean => {
 		const budget = Math.max(150_000, (ctx.model?.contextWindow ?? 128_000) * 2); // ~ bytes; mixed text runs 2-4 bytes per token
 		if (runBytes() < budget) return false;
@@ -296,7 +308,7 @@ export default function endless(pi: ExtensionAPI) {
 				text: turnState(a, ctx, `This turn ran long, so its context was rebuilt from memory (rebuild #${reviews}): everything you did so far in this turn is in the last lines of the view above; zoom them for exact details. Continue the task without repeating finished steps.${taskText && bytes(taskText) <= 4000 ? `\nThe task of this turn, verbatim: ${taskText}` : ""}`),
 			}],
 		}];
-		logged = 0;
+		logged = 1; // the rebuild note is for the model only, never logged
 		ctx.ui.notify(t("mem: this turn ran long; context rebuilt from memory", "mem：本轮太长，已从记忆重建上下文继续"), "info");
 		return true;
 	};
@@ -320,7 +332,7 @@ export default function endless(pi: ExtensionAPI) {
 			status(ctx);
 		}
 	});
-	pi.on("session_shutdown", close);
+	pi.on("session_shutdown", () => close());
 
 	const DEFAULT_PREAMBLE = "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 	let warnedForced = false;
@@ -418,19 +430,19 @@ export default function endless(pi: ExtensionAPI) {
 	const text = (s: string) => ({ content: [{ type: "text" as const, text: s }], details: undefined });
 
 	pi.registerTool({
-		name: "zoom", label: "Zoom memory", exposure: "codemode",
+		name: "zoom", label: "Zoom memory",
 		description: "Open the line id+n of the memory view into the two lines of n/2 under it; n = 1 gives message id whole. n is a power of 2 and id a multiple of n.",
 		parameters: Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Integer({ minimum: 1 }) }),
 		async execute(_id, args) { return text(need().memory.zoom(args.id, args.n)); },
 	});
 	pi.registerTool({
-		name: "date", label: "Memory date", exposure: "codemode",
+		name: "date", label: "Memory date",
 		description: "The date and time of memory message id.",
 		parameters: Type.Object({ id: Type.Integer({ minimum: 0 }) }),
 		async execute(_id, args) { return text(need().memory.date(args.id)); },
 	});
 	pi.registerTool({
-		name: "search", label: "Search memory", exposure: "codemode",
+		name: "search", label: "Search memory",
 		description: `Find the original memory messages that contain text (plain text, any case), newest first, ${SEARCH_PAGE} at a time; before: id continues with older ones. zoom(id, 1) gives a hit whole.`,
 		parameters: Type.Object({ text: Type.String({ minLength: 1 }), before: Type.Optional(Type.Integer({ minimum: 0 })) }),
 		async execute(_id, args) { return text(searchPage(need().memory, args.text, args.before)); },
@@ -473,13 +485,13 @@ export default function endless(pi: ExtensionAPI) {
 
 	// ------------------------------------------------------------ /mem
 
-	const USAGE = "/mem open <name> | close | rename <new> | status | view | zoom id+n | search <text> | model | list";
+	const USAGE = "/mem open <name> | close | rename <new> | delete <name> | status | view | zoom id+n | search <text> | model | list";
 	pi.registerCommand("mem", {
-		description: t("Endless conversation: open <name> | close | rename | status | view | zoom | search | model | list", "长期对话：open <name> | close | rename | status | view | zoom | search | model | list"),
+		description: t("Endless conversation: open <name> | close | rename | delete | status | view | zoom | search | model | list", "长期对话：open <name> | close | rename | delete | status | view | zoom | search | model | list"),
 		getArgumentCompletions: (prefix) => {
-			const m = /^(open|rename)\s+(\S*)$/.exec(prefix);
+			const m = /^(open|delete)\s+(\S*)$/.exec(prefix);
 			if (m) return listConversations().filter((n) => n.startsWith(m[2])).map((n) => ({ value: `${m[1]} ${n}`, label: n }));
-			return ["open", "close", "rename", "status", "view", "zoom", "search", "model", "list"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
+			return ["open", "close", "rename", "delete", "status", "view", "zoom", "search", "model", "list"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
 		},
 		handler: async (args, ctx) => {
 			const [cmd0, ...rest] = args.trim().split(/\s+/);
@@ -509,6 +521,18 @@ export default function endless(pi: ExtensionAPI) {
 					return;
 				}
 				if (cmd === "list") { ctx.ui.notify(listConversations().join("\n") || t("No conversations yet: /mem open <name> creates one", "还没有对话：/mem open <name> 新建"), "info"); return; }
+				if (cmd === "delete") {
+					const name = arg.trim();
+					if (!name || !listConversations().includes(name)) throw new Error(t(`Usage: /mem delete <name> (one of: ${listConversations().join(", ") || "none"})`, `用法：/mem delete <名字>（现有：${listConversations().join(", ") || "无"}）`));
+					if (active?.name === name) throw new Error(t(`${name} is open here: /mem close first`, `${name} 正开着：先 /mem close`));
+					const lock = readLock(join(HOME, name));
+					if (lock && lock.pid !== process.pid && alive(lock.pid)) throw new Error(t(`${name} is open in another pi (pid ${lock.pid})`, `${name} 正被另一个 pi 用着（pid ${lock.pid}）`));
+					const msgs = readdirSync(join(HOME, name, "main")).length ? t("has messages", "有消息") : t("is empty", "是空的");
+					if (!(await ctx.ui.confirm(t(`Delete ${name}?`, `删除 ${name}？`), t(`${name} ${msgs}. It moves to ${join(HOME, ".trash")}; nothing is destroyed.`, `${name} ${msgs}。会移到 ${join(HOME, ".trash")}，不会真的销毁。`)))) return;
+					const to = trash(name);
+					ctx.ui.notify(t(`${name} moved to ${to}`, `${name} 已移到 ${to}`), "info");
+					return;
+				}
 				const a = need();
 				if (cmd === "rename") {
 					const to = arg.trim();
@@ -517,7 +541,7 @@ export default function endless(pi: ExtensionAPI) {
 					if (a.readOnly) throw new Error(t("A read-only conversation cannot be renamed here", "只读打开的对话不能改名"));
 					if (existsSync(join(HOME, to))) throw new Error(t(`${to} already exists`, `${to} 已经存在`));
 					const from = a.name;
-					await close();
+					await close(false);
 					renameSync(join(HOME, from), join(HOME, to));
 					atomicWrite(join(HOME, from), JSON.stringify({ renamedTo: to }));
 					await open(to, ctx, false);
@@ -546,9 +570,12 @@ export default function endless(pi: ExtensionAPI) {
 				}
 				if (cmd === "search") { if (!arg) throw new Error(t("Usage: /mem search <text>", "用法：/mem search 词")); await ctx.ui.editor(`search ${arg}`, searchPage(a.memory, arg)); return; }
 				if (cmd === "model") {
-					const models = ctx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`).sort();
+					const all = ctx.modelRegistry.getAvailable();
 					const current = `${a.config.compactor.provider}/${a.config.compactor.model}`;
-					const pick = await ctx.ui.select(t(`Compactor model (now ${current})`, `压缩模型（现在 ${current}）`), [current, ...models.filter((m) => m !== current)]);
+					const cheap = all.filter((m) => /haiku|flash|mini|lite|nano|small|fast|turbo/i.test(m.id)).sort((x, y) => (x.cost?.input ?? 99) - (y.cost?.input ?? 99)).map((m) => `${m.provider}/${m.id}`);
+					const ALL = t("… all models", "… 全部模型");
+					let pick = await ctx.ui.select(t(`Compactor model (now ${current})`, `压缩模型（现在 ${current}）`), [current, ...cheap.filter((m) => m !== current), ALL]);
+					if (pick === ALL) pick = await ctx.ui.select(t("Compactor model", "压缩模型"), all.map((m) => `${m.provider}/${m.id}`).sort());
 					if (!pick) return;
 					const slash = pick.indexOf("/");
 					const OFF = t("thinking off (recommended: fast and cheap; size is enforced by the cut)", "不思考（推荐：快、便宜；尺寸由截断保证）"), MED = t("thinking medium (models that obey size limits, e.g. Haiku)", "思考 medium（听得懂尺寸限制的模型，如 Haiku）");

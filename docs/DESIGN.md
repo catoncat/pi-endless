@@ -48,7 +48,9 @@ kind：`user` / `pi`（回复）/ `tool`（调用）/ `echo`（结果，截头�
 - `message_end`：逐条进 run，视图定了之后随到随记；`agent_settled` 收尾。
 - `session_before_compact` 取消、`cache_warming_decision` stop。
 - Anthropic：视图按 4 行一块，倒数第二块打 `cache_control`，去掉 pi 在消息上的标记（4 个上限），请求末自动标记。经 PH 代理实测第二轮 cacheRead 30,956 / 新写 323。
-- 工具 `exposure: codemode`，打开对话时 `setActiveTools` 加入，关掉时移除：不开对话的会话里模型看不到它们。
+- 工具是普通（direct）工具，打开对话时 `setActiveTools` 加入，关掉时移除：不开对话的会话里模型看不到它们；三个声明很小且逐字节稳定，不伤缓存，也不依赖 codemode。
+- 只读打开 = `Memory({readOnly})`：不 append、不压缩、不写 view.json（快照）；持有者被接管时 `freeze()`，同样不再写。
+- 关闭时 0 条消息的对话目录直接删（打错名字不留壳）；`/mem delete` 只移到 `.trash/`。
 - `before_agent_start` 用 `customPrompt` 换开头；若更早的扩展返回了 `systemPrompt`（整段钉死），把它文本里的默认开头替换成我们的并提示一次。
 - 卡片是 custom entry（`registerEntryRenderer`），不进模型上下文。界面文案 `t("en","zh")` 跟随 LANG。
 - 锁：写之前核对 `lock.json` 里的 token；被接管就降只读并提示。

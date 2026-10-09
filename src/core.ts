@@ -183,6 +183,8 @@ export class View {
 // ---------------------------------------------------------------- memory
 
 export interface MemoryOptions {
+	/** Read but never write: no appends, no compactions, no view.json (a second pi looking at a conversation in use). */
+	readOnly?: boolean;
 	jobs?: number;
 	retryMs?: number;
 	viewHi?: number;
@@ -208,6 +210,7 @@ export class Memory {
 	private scheduled = false;
 	private closing = false;
 	private closed = false;
+	readOnly: boolean;
 	private readonly jobs: number;
 	private readonly retryMs: number;
 
@@ -219,7 +222,8 @@ export class Memory {
 	) {
 		this.jobs = opts.jobs ?? JOBS;
 		this.retryMs = opts.retryMs ?? RETRY_MS;
-		for (const sub of ["main", "tree"]) mkdirSync(join(dir, sub), { recursive: true, mode: 0o700 });
+		this.readOnly = opts.readOnly ?? false;
+		if (!this.readOnly) for (const sub of ["main", "tree"]) mkdirSync(join(dir, sub), { recursive: true, mode: 0o700 });
 		const sizeOf = (p: Part) => this.tree.get(key(p))?.size ?? PLACEHOLDER_BYTES;
 		const built = (p: Part) => this.tree.has(key(p));
 		this.view = new View(opts.viewHi ?? VIEW_HI, opts.viewLo ?? VIEW_LO, sizeOf, built);
@@ -283,6 +287,7 @@ export class Memory {
 	}
 
 	private saveViews(): void {
+		if (this.readOnly) return;
 		atomicWrite(join(this.dir, "view.json"), JSON.stringify({
 			view: this.view.parts.map((p) => [p.l, p.i]),
 			cview: this.cview.parts.map((p) => [p.l, p.i]),
@@ -299,6 +304,7 @@ export class Memory {
 
 	append(kind: Kind, text: string, date = new Date().toISOString()): Entry {
 		if (this.closing) throw new Error("mem: memory is closed");
+		if (this.readOnly) throw new Error("mem: memory is read-only");
 		const entry: Entry = { i: this.log.length, kind, text, size: bytes(`${kind}: ${text}`), date };
 		appendJson(join(this.dir, "main", `${localDay(new Date(date))}.jsonl`), entry);
 		this.log.push(entry);
@@ -396,7 +402,7 @@ export class Memory {
 	// ------------------------------------------------------------ compaction scheduling
 
 	private schedule(): void {
-		if (this.scheduled || this.closing) return;
+		if (this.scheduled || this.closing || this.readOnly) return;
 		this.scheduled = true;
 		queueMicrotask(() => { this.scheduled = false; this.pump(); });
 	}
@@ -488,6 +494,16 @@ export class Memory {
 	private async call(p: Part, task: string): Promise<string> {
 		const user = `${this.compactionContext(p)}\n\n${task}`;
 		return this.compress({ system: PROMPT, user, part: p }, this.controller.signal);
+	}
+
+	/** Another pi took the conversation over: stop writing anything, keep answering zoom/search/render from what is loaded. */
+	freeze(): void {
+		this.readOnly = true;
+		clearTimeout(this.retryTimer);
+		clearTimeout(this.saveTimer);
+		this.saveTimer = undefined;
+		this.controller.abort();
+		this.emit();
 	}
 
 	/** 关闭：不再接新活，给在途的压缩最多 graceMs 收尾（否则下次启动重做），然后中止。 */

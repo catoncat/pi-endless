@@ -1,6 +1,6 @@
 // 为什么测这里：合并顺序和视图持久化出错时没有任何报错，只是缓存悄悄全失效；zoom 寻址容易差一。
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cutLine, Memory, NODE, start, end, View, bytes, type Part } from "../src/core";
@@ -116,6 +116,40 @@ describe("Memory", () => {
 		expect(m2.render()).toBe(rendered);
 		expect(m2.view.bytes).toBe(m.view.bytes);
 		await m2.close();
+		rmSync(dir, { recursive: true });
+	});
+
+	// 第二个 pi 只读打开（或被接管后）绝不能写：否则两个进程同时写 tree/ 和 view.json。
+	test("只读打开不写任何文件；freeze 后同样；读接口照常", async () => {
+		const dir = tmp();
+		const m = new Memory(dir, fakeCompressor, () => {}, { jobs: 4 });
+		for (let i = 0; i < 6; i++) m.append("user", i % 2 ? "x".repeat(900) : `hi ${i}`);
+		await waitFor(() => m.owed === 0);
+		await m.close();
+		rmSync(join(dir, "view.json"));
+		const snapshot = () => readdirSync(join(dir, "tree")).map((f) => `${f}:${statSync(join(dir, "tree", f)).size}`).join(",");
+		const before = snapshot();
+		let calls = 0;
+		const ro = new Memory(dir, async (req) => { calls++; return fakeCompressor(req); }, () => {}, { readOnly: true });
+		const rendered = ro.render(); // 视图从 0 折一遍，但不落盘
+		await new Promise((r) => setTimeout(r, 50));
+		expect(existsSync(join(dir, "view.json"))).toBe(false);
+		expect(snapshot()).toBe(before);
+		expect(calls).toBe(0);
+		expect(() => ro.append("user", "nope")).toThrow(/read-only/);
+		expect(ro.zoom(0, 1)).toContain("hi 0");
+		expect(ro.search("hi").length).toBe(3);
+		await ro.close();
+		expect(existsSync(join(dir, "view.json"))).toBe(false);
+		// 持有者被接管：freeze 后不再写
+		const owner = new Memory(dir, fakeCompressor, () => {});
+		expect(existsSync(join(dir, "view.json"))).toBe(true);
+		rmSync(join(dir, "view.json"));
+		owner.freeze();
+		expect(() => owner.append("user", "nope")).toThrow(/read-only/);
+		expect(owner.render()).toBe(rendered);
+		await owner.close();
+		expect(existsSync(join(dir, "view.json"))).toBe(false);
 		rmSync(dir, { recursive: true });
 	});
 

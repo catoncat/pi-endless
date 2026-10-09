@@ -30,12 +30,13 @@ or, inside any pi session, `/mem open main`. You get a fresh session bound to th
 | `/mem open <name>` | open or create a conversation in a new session; `<Tab>` completes names |
 | `/mem close` | back to plain pi (new session) |
 | `/mem rename <new>` | rename; the old name keeps a pointer so old sessions still find it |
+| `/mem delete <name>` | move a conversation to `~/.pi/memory/.trash/` (nothing is destroyed) |
 | `/mem view` | the whole view, as the model sees it |
 | `/mem zoom 1024+256` / `/mem search <text>` | look things up yourself |
 | `/mem model` | choose the summarizing model (applies to new conversations too) |
 | `/mem list` | your conversations |
 
-One pi writes a conversation at a time. Opening it from a second pi offers **read-only** (search and zoom, nothing logged) or **take over** (the first pi becomes read-only).
+One pi writes a conversation at a time. Opening it from a second pi offers **read-only** (search and zoom on a snapshot, nothing logged, nothing written) or **take over** (the first pi becomes read-only at its next message). A conversation closed with zero messages is removed again, so a mistyped name leaves nothing behind.
 
 Data lives in `~/.pi/memory/<name>/` (`MEM_HOME` to change): `main/*.jsonl` the log, `tree/*.jsonl` the summaries, `view.json`, `config.json`. Plain files; back them up like any other.
 
@@ -62,7 +63,8 @@ Roughly one compactor call per logged message over 512 bytes, plus one merge per
 git clone https://github.com/catoncat/pi-endless && cd pi-endless
 npm ci --ignore-scripts
 npm run check              # types
-bun test                   # view math, persistence, cutting, retries
+bun test                   # view math, persistence, read-only safety, cutting, retries
+node scripts/smoke.mjs     # end-to-end over `pi --mode rpc`: open, chat, rename, reopen, recall, takeover, delete (needs a model)
 node scripts/check-recipe.mjs   # has the upstream recipe changed since the pinned revision?
 pi install .               # try it
 ```
@@ -95,6 +97,7 @@ pi --mem main        # 打开（或新建）对话 main；会话里也可 /mem o
 | `/mem open <名字>` | 新会话里打开/新建；`<Tab>` 补全 |
 | `/mem close` | 回到普通 pi |
 | `/mem rename <新名>` | 改名，旧名留指针 |
+| `/mem delete <名字>` | 移到 `~/.pi/memory/.trash/`，不真删 |
 | `/mem view` · `/mem zoom 1024+256` · `/mem search 词` | 自己翻记忆 |
 | `/mem model` | 选压缩模型（新对话也默认用它） |
 | `/mem list` | 所有对话 |

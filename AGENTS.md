@@ -34,4 +34,4 @@ MEM_HOME=... pi --mem test -p "what is the code name and the port?"          # a
 MEM_DEBUG=/tmp/payload.json MEM_HOME=... pi --mem test -p "say ok"            # inspect exactly what the model received
 ```
 
-The TUI paths (`/mem` picker, banner card, `/mem view` editor, rename, lock conflict dialog) need a human run.
+`node scripts/smoke.mjs` drives two `pi --mode rpc` processes through open / chat / status / rename / close / reopen by old name / recall / takeover / delete / prune and answers the dialogs itself (needs a logged-in model; `SMOKE_MODEL=provider/id`, `SMOKE_VERBOSE=1`). Run it after touching `src/index.ts`. Only the look of the TUI (banner card, editor views, pickers) still needs a human.
