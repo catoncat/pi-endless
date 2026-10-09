@@ -25,6 +25,7 @@ const TOOLS = ["zoom", "date", "search"];
 const SEARCH_PAGE = 20;
 const SETTLE_MS = 8000; // wait at most this long for pending summaries at the start of a turn, then go on with placeholders
 const PREV_BYTES = 16_000; // the previous exchange is carried verbatim up to this size
+const NAME = /^[\p{L}\p{N}._-]+$/u; // any letters and digits (中文 too), dots, dashes, underscores: a directory name
 const KNOWN_OVERLAPS = ["pi-blackhole", "pi-vcc", "pi-observational-memory", "pi-optchat"];
 
 interface Compactor { provider: string; model: string; thinking?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max"; maxTokens?: number }
@@ -32,6 +33,10 @@ interface Config { compactor: Compactor }
 interface Usage { calls: number; input: number; output: number; cacheRead: number; cost: number }
 interface Active { name: string; dir: string; memory: Memory; config: Config; token: string; readOnly: boolean; usage: Usage }
 interface Banner { name: string; readOnly: boolean; messages: number; compactor: string; last?: { user: string; reply: string }; tail: string[]; overlaps: string[] }
+
+// pi instantiates extensions anew for every session (/mem open, /mem close, /resume), so process-wide state lives here.
+let flagConsumed = false; // --mem applies to the first session only; a session opened later by /mem open or /mem close must not reopen it
+let warnedForced = false;
 
 const lockFile = (dir: string) => join(dir, "lock.json");
 const readLock = (dir: string): { pid: number; token: string; cwd?: string; at?: string } | undefined => {
@@ -51,7 +56,6 @@ export default function endless(pi: ExtensionAPI) {
 	let runStarted = false;
 	let reviews = 0; // mid-turn context rebuilds in this run
 	let fault: string | undefined;
-	let flagConsumed = false; // --mem applies to the first session only; a session opened later by /mem close must not reopen it
 
 	pi.registerFlag("mem", { type: "string", description: t("Open this endless conversation (~/.pi/memory/<name>); also /mem open <name> inside pi", "打开这个长期对话（~/.pi/memory/<name>）；会话里也可 /mem open <name>") });
 
@@ -84,8 +88,11 @@ export default function endless(pi: ExtensionAPI) {
 	const readJson = <T,>(file: string): T | undefined => { try { return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as T) : undefined; } catch { return undefined; } };
 	const loadConfig = (dir: string, ctx: ExtensionContext): Config => {
 		const own = readJson<Config>(join(dir, "config.json"));
-		if (own?.compactor?.provider && own.compactor.model) return own;
 		const global = readJson<Config>(join(HOME, "config.json"));
+		if (own?.compactor?.provider && own.compactor.model) {
+			if (!global) atomicWrite(join(HOME, "config.json"), JSON.stringify({ compactor: own.compactor }, null, 2)); // new conversations follow the ones you already have
+			return own;
+		}
 		const config: Config = { compactor: global?.compactor?.provider && global.compactor.model ? global.compactor : pickCompactor(ctx) };
 		atomicWrite(join(dir, "config.json"), JSON.stringify(config, null, 2));
 		return config;
@@ -154,7 +161,7 @@ export default function endless(pi: ExtensionAPI) {
 	 * binding exists the directory has to be there already; nothing else ever calls open() with create=true for it.
 	 */
 	const ensureConversation = (rawName: string): { name: string; created: boolean } => {
-		if (!/^[\w.-]+$/.test(rawName)) throw new Error(t(`Conversation names are letters, digits, . _ -: ${rawName}`, `对话名只能是字母数字 ._-：${rawName}`));
+		if (!NAME.test(rawName)) throw new Error(t(`Conversation names are letters, digits, . _ - only: ${rawName}`, `对话名只能是字母、数字、._-：${rawName}`));
 		const name = resolveName(rawName);
 		if (existsSync(join(HOME, name))) return { name, created: false };
 		mkdirSync(join(HOME, name), { recursive: true, mode: 0o700 });
@@ -171,7 +178,7 @@ export default function endless(pi: ExtensionAPI) {
 
 	const open = async (rawName: string, ctx: ExtensionContext, create = true): Promise<void> => {
 		if (active) await close();
-		if (!/^[\w.-]+$/.test(rawName)) throw new Error(t(`Conversation names are letters, digits, . _ -: ${rawName}`, `对话名只能是字母数字 ._-：${rawName}`));
+		if (!NAME.test(rawName)) throw new Error(t(`Conversation names are letters, digits, . _ - only: ${rawName}`, `对话名只能是字母、数字、._-：${rawName}`));
 		const name = resolveName(rawName);
 		const dir = join(HOME, name);
 		if (!existsSync(dir)) {
@@ -335,7 +342,6 @@ export default function endless(pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => close());
 
 	const DEFAULT_PREAMBLE = "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
-	let warnedForced = false;
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!active) return;
 		event.systemPromptOptions.customPrompt = PROMPT;
@@ -536,7 +542,7 @@ export default function endless(pi: ExtensionAPI) {
 				const a = need();
 				if (cmd === "rename") {
 					const to = arg.trim();
-					if (!/^[\w.-]+$/.test(to)) throw new Error(t("Usage: /mem rename <new-name>", "用法：/mem rename <新名字>"));
+					if (!NAME.test(to)) throw new Error(t("Usage: /mem rename <new-name>", "用法：/mem rename <新名字>"));
 					if (!ctx.isIdle()) throw new Error(t("Wait for the agent to finish first", "等 agent 停下来再改名"));
 					if (a.readOnly) throw new Error(t("A read-only conversation cannot be renamed here", "只读打开的对话不能改名"));
 					if (existsSync(join(HOME, to))) throw new Error(t(`${to} already exists`, `${to} 已经存在`));

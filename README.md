@@ -14,7 +14,7 @@ Opt-in by design. Until you open a conversation, pi is exactly pi.
 pi install git:github.com/catoncat/pi-endless
 ```
 
-Requires pi ≥ 1.0.4 and a model to summarize with (any provider you are logged in to; a cheap one is picked automatically).
+Requires pi ≥ 1.0.4 (tested on 1.0.4 and 1.1.0) and a model to summarize with: the cheapest flash/mini/haiku-class model you are logged in to is picked automatically; `/mem model` changes it.
 
 ## Use
 
@@ -40,7 +40,7 @@ One pi writes a conversation at a time. Opening it from a second pi offers **rea
 
 Data lives in `~/.pi/memory/<name>/` (`MEM_HOME` to change): `main/*.jsonl` the log, `tree/*.jsonl` the summaries, `view.json`, `config.json`. Plain files; back them up like any other.
 
-UI language follows `LANG` (`zh*` → Chinese), or set `MEM_LANG=en|zh`.
+Conversation names can be anything that makes a directory name, 中文 included. UI language follows `LANG` (`zh*` → Chinese), or set `MEM_LANG=en|zh`.
 
 ## How it works (short)
 
