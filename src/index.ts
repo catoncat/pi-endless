@@ -25,6 +25,8 @@ const TOOLS = ["zoom", "date", "search"];
 const SEARCH_PAGE = 20;
 const SETTLE_MS = 8000; // wait at most this long for pending summaries at the start of a turn, then go on with placeholders
 const PREV_BYTES = 16_000; // the previous exchange is carried verbatim up to this size
+const COMPACTOR_TIMEOUT_MS = 60_000; // a summary is ~170 tokens: a minute without an answer means the model is stuck; core retries on its own
+const WARN_EVERY_MS = 60_000; // 8 jobs failing the same way must not become 8 toasts
 const NAME = /^[\p{L}\p{N}._-]+$/u; // any letters and digits (中文 too), dots, dashes, underscores: a directory name
 const KNOWN_OVERLAPS = ["pi-blackhole", "pi-vcc", "pi-observational-memory", "pi-optchat"];
 
@@ -88,14 +90,16 @@ export default function endless(pi: ExtensionAPI) {
 		throw new Error(t("No model available for the compactor: log in to a provider, then /mem model", "没有可用的压缩模型：先登录一个 provider，再 /mem model"));
 	};
 	const readJson = <T,>(file: string): T | undefined => { try { return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as T) : undefined; } catch { return undefined; } };
-	const loadConfig = (dir: string, ctx: ExtensionContext): Config => {
+	const loadConfig = (dir: string, ctx: ExtensionContext, picked: (c: Compactor) => void): Config => {
 		const own = readJson<Config>(join(dir, "config.json"));
 		const global = readJson<Config>(join(HOME, "config.json"));
 		if (own?.compactor?.provider && own.compactor.model) {
 			if (!global) atomicWrite(join(HOME, "config.json"), JSON.stringify({ compactor: own.compactor }, null, 2)); // new conversations follow the ones you already have
 			return own;
 		}
-		const config: Config = { compactor: global?.compactor?.provider && global.compactor.model ? global.compactor : pickCompactor(ctx) };
+		const inherited = global?.compactor?.provider && global.compactor.model ? global.compactor : undefined;
+		const config: Config = { compactor: inherited ?? pickCompactor(ctx) };
+		if (!inherited) picked(config.compactor);
 		atomicWrite(join(dir, "config.json"), JSON.stringify(config, null, 2));
 		return config;
 	};
@@ -107,7 +111,8 @@ export default function endless(pi: ExtensionAPI) {
 	const compressor = (ctx: ExtensionContext, get: () => Active): Compressor => async (req, signal) => {
 		const a = get(), c = a.config.compactor;
 		const model = ctx.modelRegistry.find(c.provider, c.model);
-		if (!model) throw new Error(t(`compactor model ${c.provider}/${c.model} unavailable (/mem model)`, `压缩模型 ${c.provider}/${c.model} 不可用（/mem model）`));
+		if (!model) throw new Error(t(`compactor model ${c.provider}/${c.model} is not available; pick another with /mem model`, `压缩模型 ${c.provider}/${c.model} 不可用，用 /mem model 换一个`));
+		const timeout = COMPACTOR_TIMEOUT_MS + (c.thinking ? COMPACTOR_TIMEOUT_MS : 0);
 		const stream = ctx.modelRegistry.streamSimple(
 			model,
 			{ systemPrompt: req.system, messages: [{ role: "user", content: req.user, timestamp: Date.now() }] },
@@ -120,12 +125,19 @@ export default function endless(pi: ExtensionAPI) {
 				sessionId: "mem-compactor",
 				cacheRetention: "short",
 				transport: "sse",
+				timeoutMs: timeout,
+				maxRetries: 0, // Memory retries failed nodes itself
 			},
 		);
 		const reply = await stream.result();
 		const u = reply.usage;
 		if (u) { a.usage.calls++; a.usage.input += u.input ?? 0; a.usage.output += u.output ?? 0; a.usage.cacheRead += u.cacheRead ?? 0; a.usage.cost += u.cost?.total ?? 0; }
-		if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(reply.errorMessage ?? `compactor ${reply.stopReason}`);
+		if (reply.stopReason === "aborted" && signal.aborted) throw new Error("aborted");
+		if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+			const raw = reply.errorMessage ?? reply.stopReason;
+			const why = /timed? ?out/i.test(raw) ? t(`no answer within ${timeout / 1000}s`, `${timeout / 1000} 秒内没有响应`) : clip(flat(raw), 160);
+			throw new Error(t(`compactor ${fmtCompactor(c)}: ${why}. Retrying on its own; switch models with /mem model`, `压缩模型 ${fmtCompactor(c)}：${why}。会自动重试；换模型用 /mem model`));
+		}
 		const text = reply.content.filter((b) => b.type === "text").map((b) => b.text).join("");
 		if (!text.trim()) throw new Error("compactor returned no text");
 		return text;
@@ -200,9 +212,16 @@ export default function endless(pi: ExtensionAPI) {
 			if (choice === RO) readOnly = true;
 		}
 		if (!readOnly) atomicWrite(lockFile(dir), JSON.stringify({ pid: process.pid, token, session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, at: new Date().toISOString() }));
-		const config = loadConfig(dir, ctx);
+		const config = loadConfig(dir, ctx, (c) => ctx.ui.notify(t(`mem: summaries will be written by ${fmtCompactor(c)} (picked automatically: the cheapest model you are logged in to). Change it with /mem model.`, `mem：摘要由 ${fmtCompactor(c)} 来写（自动挑的：你已登录的最便宜模型）。换模型用 /mem model。`), "info"));
+		const warned = new Map<string, number>();
+		const warn = (s: string) => {
+			const k = s.replace(/^mem: compaction \S+ failed: /, ""), now = Date.now();
+			if (now - (warned.get(k) ?? 0) < WARN_EVERY_MS) return;
+			warned.set(k, now);
+			ctx.ui.notify(s.startsWith("mem: compaction ") ? t(`mem: a summary failed — ${k}`, `mem：摘要失败 — ${k}`) : s, "warning");
+		};
 		const a: Active = { name, dir, config, token, readOnly, memory: undefined as unknown as Memory, usage: { calls: 0, input: 0, output: 0, cacheRead: 0, cost: 0 } };
-		a.memory = new Memory(dir, compressor(ctx, () => a), (s) => ctx.ui.notify(s, "warning"), { readOnly });
+		a.memory = new Memory(dir, compressor(ctx, () => a), warn, { readOnly });
 		active = a;
 		fault = undefined;
 		a.memory.onChange(() => status(ctx));
