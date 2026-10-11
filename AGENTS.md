@@ -19,7 +19,7 @@ node scripts/check-recipe.mjs
 
 ## Working rules
 
-- `src/core.ts` is pure logic (log, tree, view, scheduler, prompts); `src/index.ts` is the pi integration; `src/i18n.ts` holds the two-language UI strings (`t("en", "zh")`). Model-facing text (prompts, tool descriptions) is English only.
+- `src/core.ts` is pure logic (log, tree, view, scheduler, prompts); `src/index.ts` is the pi integration; `src/map.ts` the `/mem` screen; `src/api.ts` + `src/cli.ts` the read-only API for everyone else (`pi-mem`, CLI and MCP; `npm run build` bundles it to `dist/pi-mem.mjs`, which the local `~/.local/bin/pi-mem` links to: rebuild after changing them). The API never writes and hides tool traffic unless asked: keep both. `src/i18n.ts` holds the two-language UI strings (`t("en", "zh")`). Model-facing text (prompts, tool descriptions) is English only.
 - Tests: `bun test`. They cover the parts that fail silently: merge order equals Taelin's push, batched merges keep the view prefix stable, the view survives a restart byte for byte, size cutting, retries, and the whole request staying a prefix of the next one (`test/index.test.ts` drives the real hooks with a fake pi and a moving clock: anything per-call placed before the run's messages breaks it). `node scripts/cache-check.mjs <provider/model>` confirms it against a real provider after changes to the turn assembly. Add a test only for a behavior with regression risk; say why.
 - Type check: `npm run check` (or `tsc -p tsconfig.local.json` when developing against a local pi install).
 - Say nothing the user cannot act on: no toasts or card lines about internals (compaction cancelled, another extension's quirks, context rebuilt). Make it work silently or fix it; put it in `MEM_TRACE`.

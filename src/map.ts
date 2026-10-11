@@ -11,6 +11,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TUI } from "@earendil-works/pi-tui";
 import { end, flat, start, type Entry, type Memory, type Part } from "./core";
 import { t } from "./i18n";
+import { heldAs } from "./api";
 
 type Item = { p: Part } | { e: Entry };
 type ListFrame = { kind: "list"; label: string; parts: () => Part[]; sel: number; top: number };
@@ -109,17 +110,16 @@ export class MemoryMap {
 		return hits.reverse(); // oldest first, like the view: the newest at the bottom
 	}
 
-	/** How the model holds message i right now: word for word, summarized alone, or inside a line covering many. */
+	/** How the model holds message i right now, in words (the same answer the CLI and MCP give). */
 	private heldAs(i: number): { label: string; text?: string } {
-		const c = this.m.view.covering(i), e = this.m.log[i];
-		if (!c || !e) return { label: "" };
-		const text = pretty(this.m.text(c));
-		if (c.l === 0) {
-			const raw = stripKind(flat(this.m.text(c)), e.kind);
-			return raw === flat(e.text) ? { label: t("in the view word for word", "原样在视图里") } : { label: t("in the view as", "在视图里写成"), text: raw };
+		const h = heldAs(this.m, i), e = this.m.log[i];
+		if (h.as === "verbatim") return { label: t("in the view word for word", "原样在视图里") };
+		if (h.as === "summarized") return { label: t("in the view as", "在视图里写成"), text: stripKind(flat(h.text ?? ""), e?.kind) };
+		if (h.as === "inside") {
+			const from = this.m.log[Number(h.line!.split("+")[0])];
+			return { label: t(`inside a line summing up ${h.covers} messages${from ? ` from ${dayLabel(from.date)}` : ""}`, `在一行概括里（${h.covers} 条${from ? `，自${dayLabel(from.date)}` : ""}）`), text: pretty(h.text ?? "") };
 		}
-		const from = this.m.log[start(c)], n = end(c) - start(c);
-		return { label: t(`inside a line summing up ${n} messages${from ? ` from ${dayLabel(from.date)}` : ""}`, `在一行概括里（${n} 条${from ? `，自${dayLabel(from.date)}` : ""}）`), text };
+		return { label: "" };
 	}
 
 	handleInput(data: string) {

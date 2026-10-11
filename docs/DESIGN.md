@@ -67,6 +67,16 @@ kind：`user` / `pi`（回复）/ `tool`（调用）/ `echo`（结果，截头�
 - 页脚只在摘要排队或出错时说话。PageUp/Down 被 pi 拿去滚聊天记录，所以翻页是 `[ ]`。搜索框用 pi-tui 的 `Input`，焦点传进去，输入法候选框位置正确。
 - 每行不超过给定宽度（`test/map.test.ts`，含搜索、中文输入、隐藏工具、打开命中），窄屏用短按键提示。
 
+## 对外只读接口（api.ts / cli.ts，`pi-mem`）
+
+给 pi 之外的任何消费方（别的 agent、脚本、MCP 客户端）读这些按主题长期养着的对话。一套能力三个入口：库 `src/api.ts`、CLI `pi-mem`、MCP `pi-mem mcp`（手写 stdio JSON-RPC，无依赖；`bun build` 成单文件 `dist/pi-mem.mjs`，Node ≥22 直接跑）。
+
+- 能力：`list`（大小、首末时间、用户最后一句、在哪个窗口开着）、`search`（原话，不搜摘要，默认跨所有对话，新的在前）、`view`（模型每轮读的那份，默认最新 200 行，免得撑爆 MCP 客户端的输出上限）、`zoom`、`message`、`since`（某时刻或某条之后，给同步类消费方）。每条命中/消息都带 `held`：verbatim / summarized / inside（哪一行、概括几条）——和 `/mem` 里"pi 记得的样子"是同一个函数。
+- 只读快照：`Memory({readOnly})`，不拿锁、不写盘（`test/api.test.ts` 比对目录前后），所以不会把对话从正在用的窗口抢走。
+- 隐私：工具调用和工具输出默认不返回（它们装着文件内容和命令输出），`includeTools` / `--include-tools` 显式要才给；测试用一个假密钥确认任何读法都不漏。
+- 实测：Claude Code 经 MCP（临时配置）自己 list → search ×3 → message ×2 → since，答出 mac 对话里卸载 app 的结论。
+- 写入（外部往对话里记一笔）没做：设计是 `inbox.jsonl`，持有者下一轮收进日志，不碰"同一时刻一个写者"。
+
 ## 刻意不做
 
 子代理（用 pi-subagents，报告自然进日志）、导入历史、连接窗口、profile 选择器、用量账本、按目录自动绑定、多会话同写（以后守护进程）。

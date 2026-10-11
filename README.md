@@ -58,11 +58,33 @@ Details and the list of deliberate deviations from the recipe: [`docs/recipe.md`
 
 Roughly one compactor call per logged message over 512 bytes, plus one merge per message amortized (merges of two short lines are free). A free or cheap model (DeepSeek/Qwen flash tiers, Haiku) makes this negligible; `/mem status` shows calls, tokens and estimated cost for the session.
 
+## Use your conversations from anywhere
+
+`pi-mem` reads your conversations without opening pi: from a shell, a script, or any agent. It never writes and never takes a conversation away from the window using it. Tool calls and tool output (file contents, command output: where secrets end up) are left out unless you pass `--include-tools`.
+
+```sh
+pi-mem list                              # conversations, newest first: size, dates, your last message
+pi-mem search "db port"                  # every conversation; -c mac for one
+pi-mem message mac 255                   # one original message, and how the model remembers it now
+pi-mem view mac --lines 50               # what the model reads each turn (newest 50 lines)
+pi-mem zoom mac 0+32 · pi-mem since mac 2026-10-11T08:00     # --json for programs
+```
+
+As an MCP server (`pi-mem mcp`, tools `list search view zoom message since`, all read-only):
+
+```sh
+claude mcp add --scope user pi-mem -- pi-mem mcp
+codex mcp add pi-mem -- pi-mem mcp
+```
+
+or in pi's `~/.pi/agent/mcp.json`: `"pi-mem": { "command": "pi-mem", "args": ["mcp"], "exposure": "deferred" }`. Installed from npm, `pi-mem` is on your PATH; from a clone, `npm run build` and link `dist/pi-mem.mjs`. The library is `src/api.ts` (`Conversation.open(name)`, `search`, `listConversations`).
+
 ## Development
 
 ```sh
 git clone https://github.com/catoncat/pi-endless && cd pi-endless
-npm ci --ignore-scripts
+bun install                # dev dependencies (bun.lock is not committed)
+npm run build              # dist/pi-mem.mjs, the CLI and MCP server
 npm run check              # types
 bun test                   # view math, persistence, read-only safety, cutting, retries, request prefix stability, map width
 node scripts/smoke.mjs     # end-to-end over `pi --mode rpc`: open, chat, rename, reopen, recall, two windows taking turns, delete (needs a model)

@@ -3,3 +3,4 @@ tsconfig.local.json
 bun.lock
 bun.lockb
 .DS_Store
+dist/
