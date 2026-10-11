@@ -34,7 +34,7 @@ or, inside any pi session, `/mem open main`. You get a fresh session bound to th
 | `/mem delete <name>` | move a conversation to `~/.pi/memory/.trash/` (nothing is destroyed) |
 | `/mem view` | the whole view, as the model sees it |
 | `/mem zoom 1024+256` / `/mem search <text>` | look things up yourself |
-| `/mem model` | choose the summarizing model (applies to new conversations too) |
+| `/mem model` | choose the summarizing model from every model you are logged in to; type to search (applies to new conversations too) |
 | `/mem list` | your conversations |
 
 Open the same conversation in as many windows as you like: it follows whichever one you talk in. A turn in another window picks up everything said elsewhere; if the other window is in the middle of answering, the new turn waits until it is done. When a turn ends in one window, the others show it as a card. Nothing is asked and nothing is lost. A conversation closed with zero messages is removed again, so a mistyped name leaves nothing behind.
@@ -124,7 +124,7 @@ pi --mem main        # 打开（或新建）对话 main；会话里也可 /mem o
 | `/mem rename <新名>` | 改名，旧名留指针 |
 | `/mem delete <名字>` | 移到 `~/.pi/memory/.trash/`，不真删 |
 | `/mem view` · `/mem zoom 1024+256` · `/mem search 词` | 自己翻记忆 |
-| `/mem model` | 选压缩模型（新对话也默认用它） |
+| `/mem model` | 从所有已登录模型里选压缩模型，打字即搜（新对话也默认用它） |
 | `/mem list` | 所有对话 |
 
 同一本对话可以在任意多个窗口里开着，在哪个窗口说话它就跟到哪：新的一轮会带上别的窗口里说过的一切；那边正在回答时，这边等它答完再开始；那边每答完一轮，这边会出现一张卡片，列出那边说了什么。不弹窗、不丢东西。数据在 `~/.pi/memory/<名字>/`，纯文本文件。界面语言跟随 `LANG`，或 `MEM_LANG=zh`。

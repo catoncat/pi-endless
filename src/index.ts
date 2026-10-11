@@ -19,6 +19,7 @@ import { Type } from "typebox";
 import { Memory, PROMPT, CAP, NODE, atomicWrite, bytes, cap, flat, start, type Compressor, type Kind } from "./core";
 import { t } from "./i18n";
 import { MemoryMap } from "./map";
+import { Picker, type PickItem } from "./picker";
 
 const HOME = process.env.MEM_HOME ?? join(homedir(), ".pi", "memory");
 const BINDING = "mem";
@@ -780,10 +781,21 @@ export default function endless(pi: ExtensionAPI) {
 				if (cmd === "model") {
 					const all = ctx.modelRegistry.getAvailable();
 					const current = `${a.config.compactor.provider}/${a.config.compactor.model}`;
-					const cheap = all.filter((m) => /haiku|flash|mini|lite|nano|small|fast|turbo/i.test(m.id)).sort((x, y) => (x.cost?.input ?? 99) - (y.cost?.input ?? 99)).map((m) => `${m.provider}/${m.id}`);
-					const ALL = t("… all models", "… 全部模型");
-					let pick = await ctx.ui.select(t(`Compactor model (now ${current})`, `压缩模型（现在 ${current}）`), [current, ...cheap.filter((m) => m !== current), ALL]);
-					if (pick === ALL) pick = await ctx.ui.select(t("Compactor model", "压缩模型"), all.map((m) => `${m.provider}/${m.id}`).sort());
+					// The current one first, then the cheap-sounding ones by price, then everything else by name: all of them, searchable
+					const cheapish = /haiku|flash|mini|lite|nano|small|fast|turbo/i;
+					const rank = (m: (typeof all)[number]) => (`${m.provider}/${m.id}` === current ? 0 : cheapish.test(m.id) ? 1 : 2);
+					const price = (m: (typeof all)[number]) => (m.cost?.input ?? 99) + (m.cost?.output ?? 99);
+					const models = [...all].sort((x, y) => rank(x) - rank(y) || (rank(x) === 1 ? price(x) - price(y) : 0) || `${x.provider}/${x.id}`.localeCompare(`${y.provider}/${y.id}`));
+					const title = t(`Compactor model (now ${current})`, `压缩模型（现在 ${current}）`);
+					let pick: string | undefined;
+					if (ctx.mode === "tui") {
+						const items: PickItem[] = models.map((m) => {
+							const value = `${m.provider}/${m.id}`;
+							const cost = m.cost && (m.cost.input || m.cost.output) ? `$${m.cost.input}/$${m.cost.output}` : "";
+							return { value, label: value, hint: [value === current ? t("current", "当前") : "", cost].filter(Boolean).join(" · "), search: `${value} ${m.name ?? ""}` };
+						});
+						pick = await ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => new Picker(tui, theme, title, items, done));
+					} else pick = await ctx.ui.select(title, models.map((m) => `${m.provider}/${m.id}`));
 					if (!pick) return;
 					const slash = pick.indexOf("/");
 					const OFF = t("thinking off (recommended: fast and cheap; size is enforced by the cut)", "不思考（推荐：快、便宜；尺寸由截断保证）"), MED = t("thinking medium (models that obey size limits, e.g. Haiku)", "思考 medium（听得懂尺寸限制的模型，如 Haiku）");
