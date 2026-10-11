@@ -47,7 +47,7 @@ kind：`user` / `pi`（回复）/ `tool`（调用）/ `echo`（结果，截头�
 - `context`：第一次调用先定视图（等摘要 ≤8 s），再把本轮消息写日志；发给模型 `[视图][<previous_exchange>][<turn> now·cwd][新消息] + 本轮后续消息`。视图整轮不变（轮内缓存）。
 - `message_end`：逐条进 run，视图定了之后随到随记；`agent_settled` 收尾。
 - `session_before_compact` 静默取消（用户无事可做，不提示）、`cache_warming_decision` stop。
-- 别的后台记忆扩展（pi-blackhole 及其前身 pi-vcc / pi-observational-memory）在打开的对话里待命：设它们文档里的 passive 环境变量。它们每会话懒读一次配置，所以在 mem 会话开始之前设（`--mem` 在扩展加载时、`/mem open` 在 newSession 之前），`/mem close` 在 newSession 之前恢复用户原值；不在 shutdown 时清，因为切换时 shutdown 夹在中间。效果（rpc 实测）：O/P 仪表和 observer 消失，只剩如实反映单次请求大小的 X 仪表。已知缝：从普通会话 /resume 进一个已绑定的会话，blackhole 可能先读到旧值。
+- 别的后台记忆扩展（pi-blackhole 及其前身 pi-vcc / pi-observational-memory）在打开的对话里待命：设它们文档里的 passive 环境变量。它们排在前面、在 session_start 里就懒读一次配置，所以必须在会话开始之前决定：启动时从命令行（`--mem`、`--session <文件或 id>`、`--continue`）读出要开的会话文件看有没有绑定；会话切换时在 `session_shutdown` 按目标决定（reload/fork 跟当前、`/mem open` 的 new 开、普通 new 关、resume 看目标文件）。我们设的值带 `PI_ENDLESS_STANDBY` 标记，子代理继承了也不会当成用户自己的设置。效果（rpc 和 herdr 面板实测）：O/P 仪表和 observer 消失，只剩如实反映单次请求大小的 X 仪表。缝：`--resume` 选择器选中的会话启动时无法预知，那一会话里 blackhole 照常跑，下次 /reload 起待命。
 - Anthropic：视图按 4 行一块，倒数第二块打 `cache_control`，去掉 pi 在消息上的标记（4 个上限），请求末自动标记。经 PH 代理实测第二轮 cacheRead 30,956 / 新写 323。
 - 工具是普通（direct）工具，打开对话时 `setActiveTools` 加入，关掉时移除：不开对话的会话里模型看不到它们；三个声明很小且逐字节稳定，不伤缓存，也不依赖 codemode。
 - 只读打开 = `Memory({readOnly})`：不 append、不压缩、不写 view.json（快照）；持有者被接管时 `freeze()`，同样不再写。

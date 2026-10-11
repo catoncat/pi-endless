@@ -32,12 +32,39 @@ const NAME = /^[\p{L}\p{N}._-]+$/u; // any letters and digits (中文 too), dots
 /**
  * Background-memory extensions (pi-blackhole and its predecessors) watch pi's session and would summarize and compact it
  * again on their own model. In an open conversation mem owns the history, so they stand by through their documented
- * passive switch. They read it once, lazily, per session: it must be set before a mem session starts (flag, /mem open)
- * and cleared before a plain one starts (/mem close), not on shutdown, which happens in between.
+ * passive switch. They read it once, lazily, early in session_start (before ours: they load first), so it is decided
+ * before a session starts: at startup from the command line, at shutdown from the session being switched to.
  */
 const STAND_BY = ["PI_BLACKHOLE_PASSIVE", "PI_VCC_OM_PASSIVE", "PI_OBSERVATIONAL_MEMORY_PASSIVE"];
-const userEnv = Object.fromEntries(STAND_BY.map((k) => [k, process.env[k]]));
-const standBy = (on: boolean) => { for (const k of STAND_BY) { const v = on ? "1" : userEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
+// Child processes (subagents) inherit the environment: values we set are marked so a child does not take them for the user's.
+const OURS = "PI_ENDLESS_STANDBY";
+const userEnv = Object.fromEntries(STAND_BY.map((k) => [k, process.env[OURS] ? undefined : process.env[k]]));
+const sessionsRoot = () => join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "sessions");
+/** Is this session file bound to a conversation? Raw `"customType":"mem"` only occurs as an entry field (content strings escape quotes). */
+const boundFile = (file?: string): boolean => { try { return !!file && readFileSync(file, "utf8").includes('"customType":"mem"'); } catch { return false; } };
+/** The session this pi process is about to start, as far as the command line tells (--resume's picker cannot be known). */
+const startupBound = (): boolean => {
+	const argv = process.argv, arg = (name: string) => { const k = argv.indexOf(name); return k >= 0 ? argv[k + 1] : undefined; };
+	if (argv.some((a) => a === "--mem" || a.startsWith("--mem="))) return true;
+	const session = arg("--session");
+	if (session) {
+		if (existsSync(session)) return boundFile(session);
+		try { // a partial session id
+			for (const d of readdirSync(sessionsRoot())) for (const f of readdirSync(join(sessionsRoot(), d))) if (f.includes(session)) return boundFile(join(sessionsRoot(), d, f));
+		} catch { /* no sessions dir */ }
+		return false;
+	}
+	if (argv.includes("--continue") || argv.includes("-c")) {
+		const dir = arg("--session-dir") ?? join(sessionsRoot(), `--${process.cwd().replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
+		try { return boundFile(join(dir, readdirSync(dir).filter((f) => f.endsWith(".jsonl")).sort().at(-1)!)); } catch { return false; }
+	}
+	return false;
+};
+let openingNew = false; // /mem open is creating the next session: its binding is written after the switch
+const standBy = (on: boolean) => {
+	for (const k of STAND_BY) { const v = on ? "1" : userEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+	if (on) process.env[OURS] = "1"; else delete process.env[OURS];
+};
 
 interface Compactor { provider: string; model: string; thinking?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max"; maxTokens?: number }
 interface Config { compactor: Compactor }
@@ -47,7 +74,7 @@ interface Banner { name: string; readOnly: boolean; messages: number; compactor:
 
 // pi instantiates extensions anew for every session (/mem open, /mem close, /resume), so process-wide state lives here.
 let flagConsumed = false; // --mem applies to the first session only; a session opened later by /mem open or /mem close must not reopen it
-if (process.argv.some((a) => a === "--mem" || a.startsWith("--mem="))) standBy(true); // before any extension's session_start
+if (!(globalThis as { __memStartup?: boolean }).__memStartup) { (globalThis as { __memStartup?: boolean }).__memStartup = true; standBy(startupBound()); } // once per process, before any session_start
 
 const lockFile = (dir: string) => join(dir, "lock.json");
 /** MEM_TRACE=<file>: append one line per hook (debugging the turn assembly). MEM_DEBUG=<file>: dump the last provider payload. */
@@ -368,7 +395,13 @@ export default function endless(pi: ExtensionAPI) {
 			status(ctx);
 		}
 	});
-	pi.on("session_shutdown", () => close());
+	pi.on("session_shutdown", (event) => {
+		// decide for the session that comes next, before its extensions start (quit: nothing comes next)
+		if (event.reason === "reload" || event.reason === "fork") standBy(active !== undefined);
+		else if (event.reason === "new") { standBy(openingNew); openingNew = false; }
+		else if (event.reason === "resume") standBy(boundFile(event.targetSessionFile));
+		return close();
+	});
 
 	const DEFAULT_PREAMBLE = "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 	pi.on("before_agent_start", (event, ctx) => {
@@ -546,9 +579,9 @@ export default function endless(pi: ExtensionAPI) {
 					name = conversation;
 					if (active?.name === name) { ctx.ui.notify(t(`${name} is already open`, `${name} 已经打开`), "info"); return; }
 					// A fresh session bound to the conversation (this one stays, /resume brings it back); session_start opens it.
-					standBy(true);
+					openingNew = true;
 					const { cancelled } = await ctx.newSession({ setup: async (sm) => { sm.appendCustomEntry(BINDING, { name }); } });
-					if (cancelled) standBy(active !== undefined);
+					openingNew = false;
 					if (cancelled && created) rmSync(join(HOME, name), { recursive: true, force: true }); // no phantom conversation left behind
 					return;
 				}
@@ -556,7 +589,6 @@ export default function endless(pi: ExtensionAPI) {
 					if (!active) { ctx.ui.notify(t("No conversation open", "没有打开的对话"), "info"); return; }
 					if (!ctx.isIdle()) throw new Error(t("Wait for the agent to finish first", "等 agent 停下来再关"));
 					await close();
-					standBy(false);
 					await ctx.newSession();
 					return;
 				}
