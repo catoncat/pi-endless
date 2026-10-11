@@ -30,4 +30,4 @@ test("任何宽度下每行都不超宽：空对话、长对话、展开到原�
 	map.dispose();
 	await m.close();
 	rmSync(dir, { recursive: true });
-});
+}, 60_000); // ~15k renders: 0.6 s here, 7 s on a CI runner
