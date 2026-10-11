@@ -14,7 +14,7 @@ let activeTools: string[] = ["read"];
 let clock = Date.parse("2026-10-11T10:00:00Z");
 
 const ctx = (api = "openai-completions") => ({
-	cwd: "/tmp/project", hasUI: false, mode: "print", signal: undefined,
+	cwd: "/tmp/project", hasUI: false, mode: "print", signal: undefined, isIdle: () => true,
 	model: { provider: "fake", id: "chat", api, contextWindow: 128_000 },
 	ui: { setStatus() {}, notify() {}, setWorkingMessage() {} },
 	sessionManager: { getEntries: () => [], getSessionId: () => "s1" },

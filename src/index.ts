@@ -4,7 +4,8 @@
  * Opt-in: nothing changes until you open a conversation (`pi --mem main` or `/mem open main`).
  * In an open conversation each turn the model sees [view][previous exchange][turn state][new message]
  * and gets zoom/date/search; everything is logged verbatim and compressed into a summary tree in the background.
- * One pi writes a conversation at a time (lock.json); a second pi may open it read-only or take it over.
+ * One pi writes a conversation at a time (lock.json); it follows whichever window you talk in, and the other windows
+ * show what was said there as a card once that turn is done.
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
@@ -15,17 +16,20 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { Memory, PROMPT, CAP, atomicWrite, bytes, cap, flat, start, type Compressor, type Kind } from "./core";
+import { Memory, PROMPT, CAP, NODE, atomicWrite, bytes, cap, flat, start, type Compressor, type Kind } from "./core";
 import { t } from "./i18n";
 import { MemoryMap } from "./map";
 
 const HOME = process.env.MEM_HOME ?? join(homedir(), ".pi", "memory");
 const BINDING = "mem";
 const BANNER = "mem-banner";
+const ELSEWHERE = "mem-elsewhere"; // card: what was said in another window since this one last showed the conversation
 const TOOLS = ["zoom", "date", "search"];
 const SEARCH_PAGE = 20;
 const SETTLE_MS = 8000; // wait at most this long for pending summaries at the start of a turn, then go on with placeholders
 const PREV_BYTES = 16_000; // the previous exchange is carried verbatim up to this size
+const HIDDEN_ROOM = 1024; // extra output tokens for a compactor that reasons without being asked (measured 35-300 tokens before its text)
+const SYNC_MS = 2000; // how often an idle window looks for turns finished in another window
 const COMPACTOR_TIMEOUT_MS = 60_000; // a summary is ~170 tokens: a minute without an answer means the model is stuck; core retries on its own
 const WARN_EVERY_MS = 60_000; // 8 jobs failing the same way must not become 8 toasts
 const NAME = /^[\p{L}\p{N}._-]+$/u; // any letters and digits (中文 too), dots, dashes, underscores: a directory name
@@ -77,6 +81,7 @@ interface Usage { calls: number; input: number; output: number; cacheRead: numbe
 interface Lock { pid: number; token: string; session?: string; cwd?: string; at?: string; busy?: boolean; beat?: string }
 interface Active { name: string; dir: string; memory: Memory; config: Config; token: string; writer: boolean; since: string; session: string; cwd: string; warn: (s: string) => void; usage: Usage }
 interface Banner { name: string; readOnly: boolean; messages: number; compactor: string; last?: { user: string; reply: string }; tail: string[] }
+interface Elsewhere { name: string; cwd?: string; exchanges: Array<{ user?: string; reply?: string }> }
 
 // pi instantiates extensions anew for every session (/mem open, /mem close, /resume), so process-wide state lives here.
 let flagConsumed = false; // --mem applies to the first session only; a session opened later by /mem open or /mem close must not reopen it
@@ -155,39 +160,46 @@ export default function endless(pi: ExtensionAPI) {
 		atomicWrite(join(HOME, "config.json"), JSON.stringify({ compactor: a.config.compactor }, null, 2)); // new conversations start from the last choice
 	};
 
+	/** Compactors seen spending the whole token budget before writing (thinking although told not to, without returning it). */
+	const roomy = new Set<string>();
 	const compressor = (ctx: ExtensionContext, get: () => Active): Compressor => async (req, signal) => {
-		const a = get(), c = a.config.compactor;
+		const a = get(), c = a.config.compactor, id = fmtCompactor(c);
 		const model = ctx.modelRegistry.find(c.provider, c.model);
 		if (!model) throw new Error(t(`compactor model ${c.provider}/${c.model} is not available; pick another with /mem model`, `压缩模型 ${c.provider}/${c.model} 不可用，用 /mem model 换一个`));
 		const timeout = COMPACTOR_TIMEOUT_MS + (c.thinking ? COMPACTOR_TIMEOUT_MS : 0);
-		const stream = ctx.modelRegistry.streamSimple(
-			model,
-			{ systemPrompt: req.system, messages: [{ role: "user", content: req.user, timestamp: Date.now() }] },
-			{
-				maxTokens: (c.maxTokens ?? 170) + (c.thinking ? 8000 : 0),
-				temperature: c.thinking ? undefined : 0.2,
-				reasoning: c.thinking,
-				samplingParams: c.thinking ? undefined : { reasoning_effort: "none", enable_thinking: false },
-				signal,
-				sessionId: "mem-compactor",
-				cacheRetention: "short",
-				transport: "sse",
-				timeoutMs: timeout,
-				maxRetries: 0, // Memory retries failed nodes itself
-			},
-		);
-		const reply = await stream.result();
-		const u = reply.usage;
-		if (u) { a.usage.calls++; a.usage.input += u.input ?? 0; a.usage.output += u.output ?? 0; a.usage.cacheRead += u.cacheRead ?? 0; a.usage.cost += u.cost?.total ?? 0; }
-		if (reply.stopReason === "aborted" && signal.aborted) throw new Error("aborted");
-		if (reply.stopReason === "error" || reply.stopReason === "aborted") {
-			const raw = reply.errorMessage ?? reply.stopReason;
-			const why = /timed? ?out/i.test(raw) ? t(`no answer within ${timeout / 1000}s`, `${timeout / 1000} 秒内没有响应`) : clip(flat(raw), 160);
-			throw new Error(t(`compactor ${fmtCompactor(c)}: ${why}. Retrying on its own; switch models with /mem model`, `压缩模型 ${fmtCompactor(c)}：${why}。会自动重试；换模型用 /mem model`));
-		}
-		const text = reply.content.filter((b) => b.type === "text").map((b) => b.text).join("");
-		if (!text.trim()) throw new Error("compactor returned no text");
-		return text;
+		const ask = async (room: number) => {
+			const stream = ctx.modelRegistry.streamSimple(
+				model,
+				{ systemPrompt: req.system, messages: [{ role: "user", content: req.user, timestamp: Date.now() }] },
+				{
+					maxTokens: (c.maxTokens ?? 170) + (c.thinking ? 8000 : room),
+					temperature: c.thinking ? undefined : 0.2,
+					reasoning: c.thinking,
+					samplingParams: c.thinking ? undefined : { reasoning_effort: "none", enable_thinking: false },
+					signal,
+					sessionId: "mem-compactor",
+					cacheRetention: "short",
+					transport: "sse",
+					timeoutMs: timeout,
+					maxRetries: 0, // Memory retries failed nodes itself
+				},
+			);
+			const reply = await stream.result();
+			const u = reply.usage;
+			if (u) { a.usage.calls++; a.usage.input += u.input ?? 0; a.usage.output += u.output ?? 0; a.usage.cacheRead += u.cacheRead ?? 0; a.usage.cost += u.cost?.total ?? 0; }
+			if (reply.stopReason === "aborted" && signal.aborted) throw new Error("aborted");
+			if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+				const raw = reply.errorMessage ?? reply.stopReason;
+				const why = /timed? ?out/i.test(raw) ? t(`no answer within ${timeout / 1000}s`, `${timeout / 1000} 秒内没有响应`) : clip(flat(raw), 160);
+				throw new Error(t(`compactor ${fmtCompactor(c)}: ${why}. Retrying on its own; switch models with /mem model`, `压缩模型 ${fmtCompactor(c)}：${why}。会自动重试；换模型用 /mem model`));
+			}
+			return { text: reply.content.filter((b) => b.type === "text").map((b) => b.text).join(""), length: reply.stopReason === "length" };
+		};
+		let r = await ask(roomy.has(id) ? HIDDEN_ROOM : 0);
+		// Out of tokens with (almost) nothing written: the budget went to hidden reasoning. Give this model room from now on.
+		if (r.length && !c.thinking && !roomy.has(id) && bytes(r.text.trim()) < NODE / 2) { roomy.add(id); trace(`roomy ${id}`); r = await ask(HIDDEN_ROOM); }
+		if (!r.text.trim()) throw new Error("compactor returned no text");
+		return r.text;
 	};
 
 	// ------------------------------------------------------------ open / close
@@ -246,8 +258,47 @@ export default function endless(pi: ExtensionAPI) {
 		});
 		a.memory.onChange(() => status(ctx));
 	};
+	// ---- other windows: after a turn there, this window reloads and shows what was said as a card (ELSEWHERE)
+	let seen = 0; // log length this window has shown: its own turns, the opening card, catch-up cards
+	let lastLock = ""; // the other window's lock as last looked at: a new beat while it is idle = a turn ended there (or it opened)
+	let syncing: Promise<void> | undefined;
+	let poll: ReturnType<typeof setInterval> | undefined;
+	const lockKey = (l?: Lock) => (l ? `${l.token} ${l.beat ?? l.at}` : "none");
+	const catchUp = (a: Active, cwd?: string) => {
+		const exchanges: Elsewhere["exchanges"] = [];
+		for (const e of a.memory.log.slice(seen)) {
+			if (e.kind === "user") exchanges.push({ user: clip(e.text, 1000) });
+			else if (e.kind === "pi") { if (!exchanges.length) exchanges.push({}); exchanges[exchanges.length - 1].reply = clip(e.text, 2000); }
+		}
+		seen = a.memory.T;
+		if (exchanges.length) pi.appendEntry<Elsewhere>(ELSEWHERE, { name: a.name, cwd: cwd !== a.cwd ? cwd : undefined, exchanges: exchanges.slice(-30) }); // the same folder says nothing
+	};
+	const watchOthers = (a: Active, ctx: ExtensionContext) => {
+		clearInterval(poll);
+		lastLock = lockKey(readLock(a.dir));
+		poll = setInterval(() => {
+			if (active !== a || syncing || runStarted || !ctx.isIdle()) return;
+			const lock = readLock(a.dir);
+			if (lock?.token === a.token || answering(lock, a.token)) return; // ours, or a turn is under way there: show it whole once done
+			const k = lockKey(lock);
+			if (k === lastLock) return;
+			lastLock = k;
+			syncing = (async () => {
+				a.memory.freeze();
+				await a.memory.close(0);
+				if (active !== a) return;
+				remember(a, ctx, false);
+				catchUp(a, lock?.cwd);
+				status(ctx);
+				trace(`synced ${a.name} T=${a.memory.T}`);
+			})().catch((e) => trace(`sync failed: ${errorText(e)}`)).finally(() => { syncing = undefined; });
+		}, SYNC_MS);
+		poll.unref?.();
+	};
+
 	/** Start of a turn: make this window the writer. Waits while another window is mid-turn, then reloads what it wrote. */
 	const acquire = async (a: Active, ctx: ExtensionContext) => {
+		await syncing;
 		if (!a.writer || readLock(a.dir)?.token !== a.token) {
 			if (answering(readLock(a.dir), a.token)) {
 				const where = readLock(a.dir)?.cwd;
@@ -255,11 +306,13 @@ export default function endless(pi: ExtensionAPI) {
 				try { while (answering(readLock(a.dir), a.token) && !ctx.signal?.aborted) await new Promise((r) => setTimeout(r, WAIT_POLL_MS)); } finally { ctx.ui.setWorkingMessage(); }
 				if (ctx.signal?.aborted) return;
 			}
+			const prior = readLock(a.dir);
 			a.memory.freeze(); // the old copy stops writing before the fresh one loads
 			await a.memory.close(0);
 			a.since = new Date().toISOString();
 			writeLock(a, true);
 			remember(a, ctx, true);
+			catchUp(a, prior?.cwd); // a turn there the watcher had no time to show (it looks every SYNC_MS)
 			fault = undefined;
 			trace(`acquired ${a.name} T=${a.memory.T}`);
 		} else writeLock(a, true);
@@ -298,6 +351,8 @@ export default function endless(pi: ExtensionAPI) {
 		if (writer) writeLock(a, false);
 		remember(a, ctx, writer);
 		active = a;
+		seen = a.memory.T; // the opening card shows the last exchange; older ones are in /mem
+		watchOthers(a, ctx);
 		fault = undefined;
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...TOOLS])]);
 		pi.setSessionName(`mem ${name}`);
@@ -317,6 +372,9 @@ export default function endless(pi: ExtensionAPI) {
 		try { flush(a); } catch { /* closing anyway */ }
 		clearInterval(beat);
 		beat = undefined;
+		clearInterval(poll);
+		poll = undefined;
+		await syncing;
 		await a.memory.close();
 		if (a.writer && readLock(a.dir)?.token === a.token) {
 			rmSync(lockFile(a.dir), { force: true });
@@ -508,6 +566,7 @@ export default function endless(pi: ExtensionAPI) {
 		if (!active) return;
 		try { flush(active); } catch (e) { ctx.ui.notify(errorText(e), "warning"); }
 		runStarted = false;
+		if (active.writer) seen = active.memory.T; // this window's own turn is on screen already
 		idle(active);
 		status(ctx);
 	});
@@ -608,6 +667,21 @@ export default function endless(pi: ExtensionAPI) {
 			if (expanded) { box.addChild(new Text(theme.fg("dim", t("the newest lines of the view (what the model sees):", "视图最新几行（模型看到的）：")), 0, 0)); for (const l of b.tail) box.addChild(new Text(theme.fg("dim", clip(l, 400)), 0, 0)); }
 			else box.addChild(new Text(theme.fg("dim", t("/mem shows the whole conversation · ctrl+o the newest lines", "/mem 看整段对话 · ctrl+o 展开最新几行")), 0, 0));
 		}
+		return box;
+	});
+
+	pi.registerEntryRenderer<Elsewhere>(ELSEWHERE, (entry, { expanded }, theme) => {
+		const e = entry.data;
+		if (!e?.exchanges?.length) return undefined;
+		const n = e.exchanges.length, dir = e.cwd?.replace(homedir(), "~");
+		const box = new Box(1, 0, (s) => theme.bg("customMessageBg", s));
+		box.addChild(new Text(`${theme.fg("accent", `📒 ${e.name}`)} · ${t(`said in another window${dir ? ` (${dir})` : ""}: ${n} ${n === 1 ? "exchange" : "exchanges"}`, `另一个窗口${dir ? `（${dir}）` : ""}里聊了 ${n} 轮`)}`, 0, 0));
+		const shown = expanded ? e.exchanges : e.exchanges.slice(-2);
+		for (const x of shown) {
+			if (x.user !== undefined) box.addChild(new Text(`${theme.fg("accent", "you")}  ${clip(flat(x.user), expanded ? 1000 : 200)}`, 0, 0));
+			if (x.reply !== undefined) box.addChild(new Text(`${theme.fg("accent", "pi")}   ${clip(flat(x.reply), expanded ? 2000 : 400)}`, 0, 0));
+		}
+		if (n > shown.length) box.addChild(new Text(theme.fg("dim", t(`ctrl+o all ${n}`, `ctrl+o 展开全部 ${n} 轮`)), 0, 0));
 		return box;
 	});
 

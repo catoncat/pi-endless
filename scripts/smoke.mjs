@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // End-to-end smoke test over `pi --mode rpc`: open / chat / status / rename / close / reopen by old name / recall /
-// a second pi on the same conversation (no question asked; turns alternate and queue) / delete to trash / mistyped name pruned. Needs a logged-in pi and a model.
+// a second pi on the same conversation (no question asked; turns alternate and queue; the idle window shows the other's turn as a card) / delete to trash / mistyped name pruned. Needs a logged-in pi and a model.
 //   node scripts/smoke.mjs            (SMOKE_MODEL=provider/id to pick the chat model; MEM_LANG is forced to en)
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -113,6 +113,11 @@ try {
 	check("second pi opens without a question", /mem smoke2/.test(n) && asked === 0, `${n.split("\n")[0]} · asked ${asked}`);
 	await b.say("Reply with just the word: orange");
 	check("second pi's turn is logged", logCount("smoke2") >= before + 2, `${before} → ${logCount("smoke2")}`);
+	// the first window shows that turn as a card on its own, without being talked to; the second does not show its own turn
+	await new Promise((r) => setTimeout(r, 3500));
+	const cards = async (pi) => { const f = (await pi.cmd({ type: "get_state" })).data?.sessionFile; return f && existsSync(f) ? readFileSync(f, "utf8").split("\n").filter((l) => l.includes('"customType":"mem-elsewhere"')) : []; };
+	const aCards = await cards(a), bCards = await cards(b);
+	check("the other window shows the turn as a card", aCards.some((l) => /orange/i.test(l)) && !bCards.length, `A ${aCards.length} card(s) · B ${bCards.length}`);
 	await a.say("What single word did you reply with in the previous turn? Answer with that word only.");
 	const back = await a.lastText();
 	check("first pi takes it back and sees the second's turn", /orange/i.test(back) && logCount("smoke2") >= before + 4, `${back.trim().slice(0, 40)} · ${logCount("smoke2")} entries`);
