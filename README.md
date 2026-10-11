@@ -26,7 +26,8 @@ or, inside any pi session, `/mem open main`. You get a fresh session bound to th
 
 | Command | What it does |
 |---|---|
-| `/mem` | status (or the conversation picker when none is open) |
+| `/mem` | the map of the conversation: how much was said vs what the model reads each turn, a timeline of how finely each stretch is remembered, and every line of the view; `enter` opens a line down to the original message (the conversation picker when none is open) |
+| `/mem status` | messages, summaries pending, summarizing model, cost this session |
 | `/mem open <name>` | open or create a conversation in a new session; `<Tab>` completes names |
 | `/mem close` | back to plain pi (new session) |
 | `/mem rename <new>` | rename; the old name keeps a pointer so old sessions still find it |
@@ -63,9 +64,10 @@ Roughly one compactor call per logged message over 512 bytes, plus one merge per
 git clone https://github.com/catoncat/pi-endless && cd pi-endless
 npm ci --ignore-scripts
 npm run check              # types
-bun test                   # view math, persistence, read-only safety, cutting, retries
+bun test                   # view math, persistence, read-only safety, cutting, retries, request prefix stability, map width
 node scripts/smoke.mjs     # end-to-end over `pi --mode rpc`: open, chat, rename, reopen, recall, takeover, delete (needs a model)
-node scripts/check-recipe.mjs   # has the upstream recipe changed since the pinned revision?
+node scripts/cache-check.mjs [provider/model]   # does a real provider serve the turns from its prompt cache? (a few cents)
+node scripts/check-recipe.mjs   # has the upstream recipe changed since the pinned revision? (the pinned text: docs/upstream/optchat.md)
 pi install .               # try it
 ```
 
@@ -93,7 +95,8 @@ pi --mem main        # 打开（或新建）对话 main；会话里也可 /mem o
 
 | 命令 | 作用 |
 |---|---|
-| `/mem` | 看状态（没开时弹选择器） |
+| `/mem` | 对话全景：说过多少 vs 每轮读多少、每段时间记得多细、视图每一行；enter 一路展开到原话（没开时弹选择器） |
+| `/mem status` | 消息数、待摘要、压缩模型、本会话费用 |
 | `/mem open <名字>` | 新会话里打开/新建；`<Tab>` 补全 |
 | `/mem close` | 回到普通 pi |
 | `/mem rename <新名>` | 改名，旧名留指针 |

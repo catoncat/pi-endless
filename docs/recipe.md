@@ -29,7 +29,7 @@ pinned revision: `3c190e06f34aba0c69f49042c526093269604935` (committed 2026-10-0
 6. **A very long turn rebuilds its context from memory** instead of overflowing: the turn's steps are already logged and in the view. The recipe leaves this as "stop and continue in a new turn".
 7. **Prompt wording**: "Unii" → "Pi", the device paragraph is dropped, the search tool is documented, and the byte hint says 512 bytes ≈ 70 English words ≈ 170 Chinese characters; "write in the language of the input".
 8. **Lock instead of a socket**: one pi writes a conversation at a time (`lock.json` with pid and token; the owner re-checks the token before every append). A second pi opens read-only on a snapshot or takes over, which demotes the first. The recipe's always-on host with a socket is not implemented.
-9. **Not done** (by design): subagents (pi has its own), importing old chats, an always-on host, a memory inspector UI.
+9. **Not done** (by design): subagents (pi has its own), importing old chats, an always-on host. A read-only map of the conversation exists (`/mem`, `src/map.ts`); it does not edit memory.
 
 ## What changed from v1 (2026-10-04) to v2 (2026-10-08), for the record
 

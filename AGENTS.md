@@ -20,8 +20,9 @@ node scripts/check-recipe.mjs
 ## Working rules
 
 - `src/core.ts` is pure logic (log, tree, view, scheduler, prompts); `src/index.ts` is the pi integration; `src/i18n.ts` holds the two-language UI strings (`t("en", "zh")`). Model-facing text (prompts, tool descriptions) is English only.
-- Tests: `bun test`. They cover the parts that fail silently: merge order equals Taelin's push, batched merges keep the view prefix stable, the view survives a restart byte for byte, size cutting, retries. Add a test only for a behavior with regression risk; say why.
+- Tests: `bun test`. They cover the parts that fail silently: merge order equals Taelin's push, batched merges keep the view prefix stable, the view survives a restart byte for byte, size cutting, retries, and the whole request staying a prefix of the next one (`test/index.test.ts` drives the real hooks with a fake pi and a moving clock: anything per-call placed before the run's messages breaks it). `node scripts/cache-check.mjs <provider/model>` confirms it against a real provider after changes to the turn assembly. Add a test only for a behavior with regression risk; say why.
 - Type check: `npm run check` (or `tsc -p tsconfig.local.json` when developing against a local pi install).
+- Say nothing the user cannot act on: no toasts or card lines about internals (compaction cancelled, another extension's quirks, context rebuilt). Make it work silently or fix it; put it in `MEM_TRACE`.
 - Keep the opt-in contract: with no conversation open, the extension must change nothing visible (no tools declared, no prompt changes, no hooks that alter requests).
 - Keep the two cache invariants: tools and system prompt are byte-stable across turns; the view only grows at its end between batches. Anything that rewrites earlier view lines costs every user a cache miss.
 - Sizes are UTF-8 bytes, never tokens.
@@ -35,4 +36,4 @@ MEM_HOME=... pi --mem test -p "what is the code name and the port?"          # a
 MEM_DEBUG=/tmp/payload.json MEM_HOME=... pi --mem test -p "say ok"            # inspect exactly what the model received
 ```
 
-`node scripts/smoke.mjs` drives two `pi --mode rpc` processes through open / chat / status / rename / close / reopen by old name / recall / takeover / delete / prune and answers the dialogs itself (needs a logged-in model; `SMOKE_MODEL=provider/id`, `SMOKE_VERBOSE=1`). Run it after touching `src/index.ts`. Only the look of the TUI (banner card, editor views, pickers) still needs a human.
+`node scripts/smoke.mjs` drives two `pi --mode rpc` processes through open / chat / status / rename / close / reopen by old name / recall / takeover / delete / prune and answers the dialogs itself (needs a logged-in model; `SMOKE_MODEL=provider/id`, `SMOKE_VERBOSE=1`). Run it after touching `src/index.ts`. Only the look of the TUI (banner card, the `/mem` map, editor views, pickers) still needs a human: run pi in tmux, open `/mem`, `tmux capture-pane -e -p | aha` and look at it.

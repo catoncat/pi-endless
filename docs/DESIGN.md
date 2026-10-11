@@ -10,9 +10,9 @@
 
 | 做什么 | 看到什么 |
 |---|---|
-| `pi --mem main`（或 `/mem open main`） | 新会话绑定这个对话；状态栏 `mem main · 1234 msgs`；聊天记录里一张卡片：上次你说的 + 它答的、消息数、压缩器，ctrl+o 展开视图最新 12 行 |
+| `pi --mem main`（或 `/mem open main`） | 新会话绑定这个对话；状态栏 `mem main · 1234 msgs`；聊天记录里一张卡片：上次你说的 + 它答的、消息数，ctrl+o 展开视图最新 12 行 |
 | 正常聊 | 和普通 pi 一样；模型多了 `zoom / date / search`；每轮开头若上一轮摘要没建完，最多等 8 s，然后用占位行继续 |
-| `/mem`（单独）| 开着→状态（含本会话压缩调用数/费用）；没开→选择器 |
+| `/mem`（单独）| 开着→全景图（下节）；没开→选择器。`/mem status` 是文字状态（含本会话压缩调用数/费用） |
 | `/mem view / zoom id+n / search 词` | 在编辑器里看整个视图、展开一行、搜原文 |
 | `/mem model` | 换压缩模型，新对话也默认用它；首次默认从已登录模型里挑最便宜的 haiku/flash/mini 类 |
 | `/mem rename <新名>` | 改名，旧名留指针文件 `{renamedTo}`，旧会话绑定和 `--mem 旧名` 都跟过来 |
@@ -46,18 +46,29 @@ kind：`user` / `pi`（回复）/ `tool`（调用）/ `echo`（结果，截头�
 - `before_agent_start`：`customPrompt` = 配方 v2 提示词（Unii→Pi；加 search；中文字节提示）；pi 的 AGENTS.md/skills/cwd 段照旧。
 - `context`：第一次调用先定视图（等摘要 ≤8 s），再把本轮消息写日志；发给模型 `[视图][<previous_exchange>][<turn> now·cwd][新消息] + 本轮后续消息`。视图整轮不变（轮内缓存）。
 - `message_end`：逐条进 run，视图定了之后随到随记；`agent_settled` 收尾。
-- `session_before_compact` 取消、`cache_warming_decision` stop。
+- `session_before_compact` 静默取消（用户无事可做，不提示）、`cache_warming_decision` stop。
+- 别的后台记忆扩展（pi-blackhole 及其前身 pi-vcc / pi-observational-memory）在打开的对话里待命：设它们文档里的 passive 环境变量。它们每会话懒读一次配置，所以在 mem 会话开始之前设（`--mem` 在扩展加载时、`/mem open` 在 newSession 之前），`/mem close` 在 newSession 之前恢复用户原值；不在 shutdown 时清，因为切换时 shutdown 夹在中间。效果（rpc 实测）：O/P 仪表和 observer 消失，只剩如实反映单次请求大小的 X 仪表。已知缝：从普通会话 /resume 进一个已绑定的会话，blackhole 可能先读到旧值。
 - Anthropic：视图按 4 行一块，倒数第二块打 `cache_control`，去掉 pi 在消息上的标记（4 个上限），请求末自动标记。经 PH 代理实测第二轮 cacheRead 30,956 / 新写 323。
 - 工具是普通（direct）工具，打开对话时 `setActiveTools` 加入，关掉时移除：不开对话的会话里模型看不到它们；三个声明很小且逐字节稳定，不伤缓存，也不依赖 codemode。
 - 只读打开 = `Memory({readOnly})`：不 append、不压缩、不写 view.json（快照）；持有者被接管时 `freeze()`，同样不再写。
 - 关闭时 0 条消息的对话目录直接删（打错名字不留壳）；`/mem delete` 只移到 `.trash/`。
-- `before_agent_start` 用 `customPrompt` 换开头；若更早的扩展返回了 `systemPrompt`（整段钉死），把它文本里的默认开头替换成我们的并提示一次。
+- `before_agent_start` 用 `customPrompt` 换开头；若更早的扩展返回了 `systemPrompt`（整段钉死），把它文本里的默认开头替换成我们的（不提示：那是别的扩展作者的事）。
 - 卡片是 custom entry（`registerEntryRenderer`），不进模型上下文。界面文案 `t("en","zh")` 跟随 LANG。
 - 锁：写之前核对 `lock.json` 里的 token；被接管就降只读并提示。
 
+## 全景图（map.ts，`/mem`）
+
+让人一眼看到这本对话是什么样子，不讲道理：
+
+- 两根同比例的柱：说过的全部（日志字节）vs 每轮读的（视图字节）；后者分两色——灰=概括多条的行，绿=一条一行。
+- 两行高的天际线：横轴是全部消息，每格的高度 = 覆盖它的那行有多细（`16-2l` 个八分之一格），同样灰/绿；当前选中行覆盖的那段亮成强调色并在下面画括号。
+- 视图的每一行（新的在底），带消息号段、时间、你/pi/工具/结果标签；enter 打开成两半，一路到原话；← 返回。
+- 摘要在后台落地时实时重画；页脚只在有摘要排队或出错时说话。PageUp/Down 被 pi 拿去滚聊天记录，所以翻页是 `[ ]`。
+- 每行不超过给定宽度（`test/map.test.ts`），窄屏自动用短的按键提示。
+
 ## 刻意不做
 
-子代理（用 pi-subagents，报告自然进日志）、导入历史、连接窗口、检查器 UI、profile 选择器、用量账本、按目录自动绑定、多会话同写（以后守护进程）。
+子代理（用 pi-subagents，报告自然进日志）、导入历史、连接窗口、profile 选择器、用量账本、按目录自动绑定、多会话同写（以后守护进程）。
 
 ## 已知边界
 
@@ -70,5 +81,6 @@ kind：`user` / `pi`（回复）/ `tool`（调用）/ `echo`（结果，截头�
 
 ## 验证
 
-- `bun test`：push 等价（t=0..3000）、锯齿缓存稳定、延迟合并、cutLine、建树/重启视图逐字节相同、重试、settle。
+- `bun test`：push 等价（t=0..3000）、锯齿缓存稳定、延迟合并、cutLine、建树/重启视图逐字节相同、重试、settle；整条请求的前缀稳定（`test/index.test.ts`：轮内每步拨钟后上一次是下一次的前缀、跨轮系统提示词/工具/旧视图不变、Anthropic 标记位置，修复前的代码上它是红的）；全景图任意宽度不超宽。
+- `node scripts/cache-check.mjs <provider/model>`：真实服务商两轮多步，cacheRead 每步都涨、第二轮开头命中。2026-10-11 DeepSeek V4 Flash：21888→50048 逐步上涨，第二轮首步 21632。
 - print 模式：跨启动记住"蓝鲸/5433"；读 20KB 文件后下一次启动用 `search`+`zoom(6,1)` 找回 "v0.7.2"；撞锁退化为普通 pi；Haiku 经 PH 缓存命中。
