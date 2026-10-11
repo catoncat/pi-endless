@@ -8,6 +8,6 @@ One chat that never ends, for pi: Taelin's OptChat/UniiChat recipe (gist revisio
 - `/mem`: the map of a conversation — search every original message as you type (hits on the timeline, each saying how the model remembers it), the view's lines by day down to the original words, said vs read each turn.
 - The same conversation in several windows: it follows whichever one you talk in; a turn waits while another window is answering and picks up what was said there.
 - `pi-mem`: read-only CLI and MCP server (`list search view zoom message since`) for other agents and scripts; tool traffic hidden unless asked.
-- Prompt cache kept across steps and turns (checked on DeepSeek, Claude, GPT and Gemini with `scripts/cache-check.mjs`); the summarizer defaults to the chat model's provider.
+- Prompt cache kept across steps and turns (checked with `scripts/cache-check.mjs` on DeepSeek, Claude and GPT; Gemini behind a proxy was inconclusive); the summarizer defaults to the chat model's provider.
 - Background-memory extensions (pi-blackhole and predecessors) stand by inside an open conversation.
 - Batch merges wait for the most due pair instead of coarsening the newest lines when the summarizer lags (found by replaying 700 real messages).

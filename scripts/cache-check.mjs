@@ -3,7 +3,9 @@
 // conversation: turn 1 reads 4 files one call at a time; turn 2, a new pi process continuing the same session, reads 2 more.
 // Pass = cacheRead grows at every step after the first of a turn (the run's own messages are cached), and turn 2's first
 // call reads the cache at all (system prompt + tools + the view written by turn 1). Costs a few cents of the chosen model.
-//   node scripts/cache-check.mjs [provider/model]      (or CACHE_MODEL=provider/model; default: pi's default model)
+// Only this extension is loaded, so another extension changing its tools between sessions cannot blur the verdict;
+// --with-my-extensions measures your whole setup instead (a resumed session that re-registers a tool misses once).
+//   node scripts/cache-check.mjs [provider/model] [--with-my-extensions]   (or CACHE_MODEL=provider/model)
 // exit 0 = cached as designed, 1 = cache misses (or the provider reports no cache usage), 2 = pi failed
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -11,13 +13,15 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const model = process.argv[2] ?? process.env.CACHE_MODEL;
+const args = process.argv.slice(2), mine = args.includes("--with-my-extensions");
+const model = args.find((a) => !a.startsWith("--")) ?? process.env.CACHE_MODEL;
+const only = mine ? [] : ["-ne", "-e", join(import.meta.dirname, "..")];
 const root = mkdtempSync(join(tmpdir(), "pi-endless-cache-"));
 const [home, cwd, sessions] = ["mem", "cwd", "sessions"].map((d) => { const p = join(root, d); spawnSync("mkdir", ["-p", p]); return p; });
 for (let i = 1; i <= 6; i++) writeFileSync(join(cwd, `f${i}.txt`), randomBytes(2400).toString("base64")); // incompressible, ~1k tokens each
 
 const pi = (prompt, more = []) => {
-	const r = spawnSync("pi", [...(model ? ["--model", model] : []), "--session-dir", sessions, ...more, "--mem", "cachecheck", "-p", prompt], {
+	const r = spawnSync("pi", [...(model ? ["--model", model] : []), ...only, "--session-dir", sessions, ...more, "--mem", "cachecheck", "-p", prompt], {
 		cwd, env: { ...process.env, MEM_HOME: home }, encoding: "utf8", timeout: 300_000,
 	});
 	if (r.status !== 0) { console.error(`pi failed (${r.status}): ${(r.stderr || r.stdout).slice(-800)}`); rmSync(root, { recursive: true, force: true }); process.exit(2); }
