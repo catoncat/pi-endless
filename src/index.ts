@@ -273,7 +273,7 @@ export default function endless(pi: ExtensionAPI) {
 		if (a.writer && readLock(a.dir)?.token === a.token) writeLock(a, false);
 	};
 
-	const open = async (rawName: string, ctx: ExtensionContext, create = true): Promise<void> => {
+	const open = async (rawName: string, ctx: ExtensionContext, create = true, announce = true): Promise<void> => {
 		if (active) await close();
 		if (!NAME.test(rawName)) throw new Error(t(`Conversation names are letters, digits, . _ - only: ${rawName}`, `对话名只能是字母、数字、._-：${rawName}`));
 		const name = resolveName(rawName);
@@ -306,7 +306,7 @@ export default function endless(pi: ExtensionAPI) {
 			name, readOnly: !writer, messages: a.memory.T, compactor: fmtCompactor(config.compactor), last: lastExchange(a.memory),
 			tail: a.memory.view.parts.slice(-12).map((p) => a.memory.renderLine(p)),
 		};
-		pi.appendEntry(BANNER, banner);
+		if (announce) pi.appendEntry(BANNER, banner); // a reload reopens the same session: its card is already there
 		if (ctx.mode !== "tui") ctx.ui.notify(`mem ${name}${writer ? "" : " (in use in another window)"} · ${a.memory.T} messages · ${banner.compactor}`, "info");
 	};
 
@@ -422,7 +422,8 @@ export default function endless(pi: ExtensionAPI) {
 
 	// ------------------------------------------------------------ pi events
 
-	pi.on("session_start", async (_e, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
+		(globalThis as { __memSession?: unknown }).__memSession = ctx.sessionManager; // for the card renderer, which pi may call before session_start (reload)
 		const flag = flagConsumed ? undefined : pi.getFlag("mem");
 		flagConsumed = true;
 		const bound = ctx.sessionManager.getEntries().findLast((e) => e.type === "custom" && e.customType === BINDING);
@@ -432,7 +433,7 @@ export default function endless(pi: ExtensionAPI) {
 		if (!name) { status(ctx); return; }
 		if (boundName && typeof flag === "string" && flag && flag !== boundName) ctx.ui.notify(t(`This session is bound to ${boundName}; ignoring --mem ${flag}`, `这个会话绑定的是 ${boundName}，忽略 --mem ${flag}`), "warning");
 		try {
-			await open(name, ctx, name !== boundName);
+			await open(name, ctx, name !== boundName, event.reason !== "reload");
 			if (active && active.name !== boundName) pi.appendEntry(BINDING, { name: active.name });
 		} catch (e) {
 			fault = errorText(e);
@@ -583,9 +584,18 @@ export default function endless(pi: ExtensionAPI) {
 
 	// ------------------------------------------------------------ banner (scrollback entry, never sent to the model)
 
+	/** A session shows one card, its newest (older sessions piled one up per reload). */
+	const supersededCard = (id: string): boolean => {
+		const sm = (globalThis as { __memSession?: { getEntries(): Array<{ id: string; type: string; customType?: string }> } }).__memSession;
+		try {
+			const entries = sm?.getEntries() ?? [];
+			const at = entries.findIndex((e) => e.id === id);
+			return at >= 0 && entries.slice(at + 1).some((e) => e.type === "custom" && e.customType === BANNER);
+		} catch { return false; }
+	};
 	pi.registerEntryRenderer<Banner>(BANNER, (entry, { expanded }, theme) => {
 		const b = entry.data;
-		if (!b) return undefined;
+		if (!b || supersededCard(entry.id)) return undefined;
 		const box = new Box(1, 0, (s) => theme.bg("customMessageBg", s));
 		const head = `${theme.fg("accent", `📒 ${b.name}`)}${b.readOnly ? theme.fg("dim", t(" · in use in another window", " · 另一个窗口正在用")) : ""} · ${b.messages} ${t("messages", "条消息")}`;
 		box.addChild(new Text(head, 0, 0));
