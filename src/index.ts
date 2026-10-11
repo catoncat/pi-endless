@@ -28,17 +28,25 @@ const PREV_BYTES = 16_000; // the previous exchange is carried verbatim up to th
 const COMPACTOR_TIMEOUT_MS = 60_000; // a summary is ~170 tokens: a minute without an answer means the model is stuck; core retries on its own
 const WARN_EVERY_MS = 60_000; // 8 jobs failing the same way must not become 8 toasts
 const NAME = /^[\p{L}\p{N}._-]+$/u; // any letters and digits (中文 too), dots, dashes, underscores: a directory name
-const KNOWN_OVERLAPS = ["pi-blackhole", "pi-vcc", "pi-observational-memory", "pi-optchat"];
+/**
+ * Background-memory extensions (pi-blackhole and its predecessors) watch pi's session and would summarize and compact it
+ * again on their own model. In an open conversation mem owns the history, so they stand by through their documented
+ * passive switch. They read it once, lazily, per session: it must be set before a mem session starts (flag, /mem open)
+ * and cleared before a plain one starts (/mem close), not on shutdown, which happens in between.
+ */
+const STAND_BY = ["PI_BLACKHOLE_PASSIVE", "PI_VCC_OM_PASSIVE", "PI_OBSERVATIONAL_MEMORY_PASSIVE"];
+const userEnv = Object.fromEntries(STAND_BY.map((k) => [k, process.env[k]]));
+const standBy = (on: boolean) => { for (const k of STAND_BY) { const v = on ? "1" : userEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
 
 interface Compactor { provider: string; model: string; thinking?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max"; maxTokens?: number }
 interface Config { compactor: Compactor }
 interface Usage { calls: number; input: number; output: number; cacheRead: number; cost: number }
 interface Active { name: string; dir: string; memory: Memory; config: Config; token: string; readOnly: boolean; usage: Usage }
-interface Banner { name: string; readOnly: boolean; messages: number; compactor: string; last?: { user: string; reply: string }; tail: string[]; overlaps: string[] }
+interface Banner { name: string; readOnly: boolean; messages: number; compactor: string; last?: { user: string; reply: string }; tail: string[] }
 
 // pi instantiates extensions anew for every session (/mem open, /mem close, /resume), so process-wide state lives here.
 let flagConsumed = false; // --mem applies to the first session only; a session opened later by /mem open or /mem close must not reopen it
-let warnedForced = false;
+if (process.argv.some((a) => a === "--mem" || a.startsWith("--mem="))) standBy(true); // before any extension's session_start
 
 const lockFile = (dir: string) => join(dir, "lock.json");
 /** MEM_TRACE=<file>: append one line per hook (debugging the turn assembly). MEM_DEBUG=<file>: dump the last provider payload. */
@@ -146,12 +154,6 @@ export default function endless(pi: ExtensionAPI) {
 
 	// ------------------------------------------------------------ open / close
 
-	const overlaps = (): string[] => {
-		try {
-			const settings = pi.getSettings() as { packages?: unknown[] };
-			return (settings.packages ?? []).map((p) => (typeof p === "string" ? p : ((p as { source?: string }).source ?? ""))).filter((s) => KNOWN_OVERLAPS.some((c) => s.includes(c)));
-		} catch { return []; }
-	};
 	const listConversations = () => (existsSync(HOME) ? readdirSync(HOME, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith(".")).map((d) => d.name).sort() : []);
 	/** Deleting never destroys: the conversation moves to ~/.pi/memory/.trash/<name>-<time>. */
 	const trash = (name: string) => {
@@ -231,7 +233,7 @@ export default function endless(pi: ExtensionAPI) {
 		status(ctx);
 		const banner: Banner = {
 			name, readOnly, messages: a.memory.T, compactor: fmtCompactor(config.compactor), last: lastExchange(a.memory),
-			tail: a.memory.view.parts.slice(-12).map((p) => a.memory.renderLine(p)), overlaps: overlaps(),
+			tail: a.memory.view.parts.slice(-12).map((p) => a.memory.renderLine(p)),
 		};
 		pi.appendEntry(BANNER, banner);
 		if (ctx.mode !== "tui") ctx.ui.notify(`mem ${name}${readOnly ? " (read-only)" : ""} · ${a.memory.T} messages · ${banner.compactor}`, "info");
@@ -341,7 +343,7 @@ export default function endless(pi: ExtensionAPI) {
 			}],
 		}];
 		logged = 1; // the rebuild note is for the model only, never logged
-		ctx.ui.notify(t("mem: this turn ran long; context rebuilt from memory", "mem：本轮太长，已从记忆重建上下文继续"), "info");
+		trace(`review #${reviews}`); // nothing for the user to do: the turn just goes on
 		return true;
 	};
 
@@ -353,6 +355,7 @@ export default function endless(pi: ExtensionAPI) {
 		const bound = ctx.sessionManager.getEntries().findLast((e) => e.type === "custom" && e.customType === BINDING);
 		const boundName = bound?.type === "custom" && bound.data && typeof (bound.data as { name?: unknown }).name === "string" ? (bound.data as { name: string }).name : undefined;
 		const name = boundName ?? (typeof flag === "string" && flag ? flag : undefined);
+		standBy(name !== undefined);
 		if (!name) { status(ctx); return; }
 		if (boundName && typeof flag === "string" && flag && flag !== boundName) ctx.ui.notify(t(`This session is bound to ${boundName}; ignoring --mem ${flag}`, `这个会话绑定的是 ${boundName}，忽略 --mem ${flag}`), "warning");
 		try {
@@ -375,7 +378,6 @@ export default function endless(pi: ExtensionAPI) {
 		// An earlier extension returned `systemPrompt` (forcing the whole prompt), which would hide ours: swap its default preamble for ours.
 		const forced = event.systemPromptOptions.forceSystemPrompt;
 		if (forced !== undefined && !forced.includes(PROMPT.slice(0, 40))) {
-			if (!warnedForced) { warnedForced = true; ctx.ui.notify(t("mem: another extension forces the system prompt via before_agent_start; patched its preamble. It should use systemPromptOptions.sections instead.", "mem：有扩展在 before_agent_start 返回 systemPrompt 钉死了提示词，已替换其默认开头；它应改用 systemPromptOptions.sections。"), "warning"); }
 			return { systemPrompt: forced.includes(DEFAULT_PREAMBLE) ? forced.replace(DEFAULT_PREAMBLE, PROMPT) : `${PROMPT}\n\n${forced}` };
 		}
 	});
@@ -427,9 +429,9 @@ export default function endless(pi: ExtensionAPI) {
 		status(ctx);
 	});
 
-	pi.on("session_before_compact", (_e, ctx) => {
+	pi.on("session_before_compact", () => {
 		if (!active) return;
-		ctx.ui.notify(t("mem owns the history: pi compaction cancelled.", "mem 接管了历史：pi 的 compaction 已取消。"), "info");
+		trace("compaction cancelled"); // mem owns the history; a long turn rebuilds its own context (reviewIfLong)
 		return { cancel: true };
 	});
 	pi.on("cache_warming_decision", () => (active ? { action: "stop" } : undefined));
@@ -514,7 +516,6 @@ export default function endless(pi: ExtensionAPI) {
 			if (expanded) { box.addChild(new Text(theme.fg("dim", t("the newest lines of the view (what the model sees):", "视图最新几行（模型看到的）：")), 0, 0)); for (const l of b.tail) box.addChild(new Text(theme.fg("dim", clip(l, 400)), 0, 0)); }
 			else box.addChild(new Text(theme.fg("dim", t("/mem for status · /mem view for the whole view · ctrl+o shows the newest lines", "/mem 看状态 · /mem view 看整个视图 · ctrl+o 展开最新几行")), 0, 0));
 		}
-		if (b.overlaps.length) box.addChild(new Text(theme.fg("warning", t(`note: ${b.overlaps.join(", ")} will run its workers for nothing here (memory is unaffected)`, `提示：${b.overlaps.join(", ")} 的后台 worker 在这里会白跑（记忆不受影响）`)), 0, 0));
 		return box;
 	});
 
@@ -544,7 +545,9 @@ export default function endless(pi: ExtensionAPI) {
 					name = conversation;
 					if (active?.name === name) { ctx.ui.notify(t(`${name} is already open`, `${name} 已经打开`), "info"); return; }
 					// A fresh session bound to the conversation (this one stays, /resume brings it back); session_start opens it.
+					standBy(true);
 					const { cancelled } = await ctx.newSession({ setup: async (sm) => { sm.appendCustomEntry(BINDING, { name }); } });
+					if (cancelled) standBy(active !== undefined);
 					if (cancelled && created) rmSync(join(HOME, name), { recursive: true, force: true }); // no phantom conversation left behind
 					return;
 				}
@@ -552,6 +555,7 @@ export default function endless(pi: ExtensionAPI) {
 					if (!active) { ctx.ui.notify(t("No conversation open", "没有打开的对话"), "info"); return; }
 					if (!ctx.isIdle()) throw new Error(t("Wait for the agent to finish first", "等 agent 停下来再关"));
 					await close();
+					standBy(false);
 					await ctx.newSession();
 					return;
 				}
