@@ -5,7 +5,7 @@ URL: https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449
 
 pinned revision: `3c190e06f34aba0c69f49042c526093269604935` (committed 2026-10-08T01:58:24Z, the "v2" rewrite; v1 was 2026-10-04).
 
-`node scripts/check-recipe.mjs` compares the pinned revision with the latest one and prints the diff when the gist changed. Run it before touching the design (see AGENTS.md). The gist text is not copied into this repository; the GitHub API serves any revision by its SHA.
+`node scripts/check-recipe.mjs` compares the pinned revision with the latest one and prints the diff when the gist changed. Run it before touching the design (see AGENTS.md). The pinned revision is kept verbatim in [`upstream/optchat.md`](upstream/optchat.md) as the theory source: the script fails (exit 3) when that copy is not exactly the pinned revision, and `--write` regenerates it. It stays the author's text (not under this repository's MIT license) and is left out of the npm package.
 
 ## Where each part of the recipe lives
 

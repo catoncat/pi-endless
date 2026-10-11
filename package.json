@@ -10,7 +10,7 @@
 	"bugs": { "url": "https://github.com/catoncat/pi-endless/issues" },
 	"keywords": ["pi-package", "pi-extension", "memory", "optchat", "endless-chat"],
 	"pi": { "extensions": ["./src/index.ts"] },
-	"files": ["src", "docs", "scripts", "README.md", "LICENSE", "AGENTS.md"],
+	"files": ["src", "docs", "!docs/upstream", "scripts", "README.md", "LICENSE", "AGENTS.md"],
 	"scripts": {
 		"check": "tsc --noEmit -p tsconfig.json",
 		"test": "bun test",

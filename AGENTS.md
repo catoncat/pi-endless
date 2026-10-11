@@ -11,10 +11,11 @@ node scripts/check-recipe.mjs
 ```
 
 - exit 0: the pinned revision is still the latest; go ahead.
-- exit 2: the gist changed. Read the printed diff first. Then, in this order: list what changed in the design (not wording), decide per item whether to follow it or keep a deliberate deviation (add it to `docs/recipe.md` with the reason), update `pinned revision` in `docs/recipe.md`, change the code, run the tests. Tell the user what upstream changed and what you did about it.
+- exit 2: the gist changed. Read the printed diff first. Then, in this order: list what changed in the design (not wording), decide per item whether to follow it or keep a deliberate deviation (add it to `docs/recipe.md` with the reason), update `pinned revision` in `docs/recipe.md`, run `node scripts/check-recipe.mjs --write` to refresh `docs/upstream/optchat.md`, change the code, run the tests. Tell the user what upstream changed and what you did about it.
+- exit 3: `docs/upstream/optchat.md` is not the pinned revision verbatim; run with `--write` and commit the result.
 - exit 1: network/API problem; say so and continue, but do not update the pinned revision.
 
-Never paste the gist text into the repository; `scripts/check-recipe.mjs` fetches any revision by SHA.
+`docs/upstream/optchat.md` is the upstream text, our theory source: cite it, never edit it by hand (only `--write` touches it). It keeps the author's rights, so it stays out of the npm package (`!docs/upstream` in `files`).
 
 ## Working rules
 
