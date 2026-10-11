@@ -57,6 +57,7 @@ export default function endless(pi: ExtensionAPI) {
 	let logged = 0;
 	let view: string | undefined;
 	let prevExchange = "";
+	let turn = ""; // <turn> block, fixed once per run: a per-call timestamp would sit before the run's messages and break the prefix cache on every step
 	let runStarted = false;
 	let reviews = 0; // mid-turn context rebuilds in this run
 	let fault: string | undefined;
@@ -308,7 +309,7 @@ export default function endless(pi: ExtensionAPI) {
 
 	/** Messages for the model: the first one carries [view][previous exchange][turn state], the rest of the run follows as is. */
 	const buildContext = (a: Active, ctx: ExtensionContext): AgentMessage[] => {
-		const blocks = [view!, ...(prevExchange ? [prevExchange] : []), turnState(a, ctx)].map((text) => ({ type: "text" as const, text }));
+		const blocks = [view!, ...(prevExchange ? [prevExchange] : []), turn].map((text) => ({ type: "text" as const, text }));
 		const first = run[0];
 		if (first && first.role === "user") {
 			const content = typeof first.content === "string" ? [{ type: "text" as const, text: first.content }] : first.content;
@@ -328,6 +329,7 @@ export default function endless(pi: ExtensionAPI) {
 		const task = run.find((m) => m.role === "user");
 		const taskText = task ? textOf(task.content) : "";
 		view = a.memory.render();
+		turn = turnState(a, ctx);
 		prevExchange = "";
 		reviews++;
 		run = [{
@@ -408,6 +410,7 @@ export default function endless(pi: ExtensionAPI) {
 				try { await m.settle(SETTLE_MS, ctx.signal); } finally { off(); ctx.ui.setWorkingMessage(); }
 			}
 			view = m.render(); // the view covers everything before this turn's new message, which is logged right after
+			turn = turnState(a, ctx);
 			try { flush(a); } catch (e) { ctx.ui.notify(errorText(e), "warning"); }
 			status(ctx);
 		} else {
