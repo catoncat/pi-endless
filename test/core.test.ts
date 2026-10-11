@@ -83,6 +83,7 @@ describe("View", () => {
 describe("cutLine", () => {
 	test("短的原样；去掉 id+n| 头和围栏", () => {
 		expect(cutLine("12+4|hello world").line).toBe("hello world");
+		expect(cutLine("263|pi: removed the tern link").line).toBe("pi: removed the tern link"); // seen from DeepSeek: the address without +n
 		expect(cutLine("```\nhello\n```").line).toBe("hello");
 	});
 	test("超长在最后一个分隔符处截，≤512 字节，中文也安全", () => {

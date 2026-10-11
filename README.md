@@ -26,7 +26,7 @@ or, inside any pi session, `/mem open main`. You get a fresh session bound to th
 
 | Command | What it does |
 |---|---|
-| `/mem` | the map of the conversation: how much was said vs what the model reads each turn, a timeline of how finely each stretch is remembered, and every line of the view; `enter` opens a line down to the original message (the conversation picker when none is open) |
+| `/mem` | the map of the conversation: `/` searches every message ever said as you type (hits marked on the timeline, each telling how the model remembers it); the lines the model reads, by day, `enter` down to the original words; how much was said vs read each turn and how finely each stretch is remembered (the conversation picker when none is open) |
 | `/mem status` | messages, summaries pending, summarizing model, cost this session |
 | `/mem open <name>` | open or create a conversation in a new session; `<Tab>` completes names |
 | `/mem close` | back to plain pi (new session) |
@@ -95,7 +95,7 @@ pi --mem main        # 打开（或新建）对话 main；会话里也可 /mem o
 
 | 命令 | 作用 |
 |---|---|
-| `/mem` | 对话全景：说过多少 vs 每轮读多少、每段时间记得多细、视图每一行；enter 一路展开到原话（没开时弹选择器） |
+| `/mem` | 对话全景：`/` 边打边搜说过的每句原话（命中标在时间轴上，并告诉你模型现在记得的样子）；模型读的每一行按天排，enter 一路展开到原话；说过多少 vs 每轮读多少、每段记得多细（没开时弹选择器） |
 | `/mem status` | 消息数、待摘要、压缩模型、本会话费用 |
 | `/mem open <名字>` | 新会话里打开/新建；`<Tab>` 补全 |
 | `/mem close` | 回到普通 pi |

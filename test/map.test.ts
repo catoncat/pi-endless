@@ -21,6 +21,12 @@ test("任何宽度下每行都不超宽：空对话、长对话、展开到原�
 	check(map);
 	map.handleInput("g");
 	for (let k = 0; k < 12; k++) { map.handleInput("\r"); check(map); } // down to the original message
+	for (let k = 0; k < 12; k++) map.handleInput("\x1b[D"); // back to the top
+	map.handleInput("t"); check(map); // tool calls hidden
+	map.handleInput("/");
+	for (const ch of "第 1") { map.handleInput(ch); check(map); } // searching as you type, CJK included
+	map.handleInput("\x1b[A"); check(map);
+	map.handleInput("\r"); check(map); // a hit, opened
 	map.dispose();
 	await m.close();
 	rmSync(dir, { recursive: true });

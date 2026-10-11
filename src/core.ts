@@ -47,7 +47,7 @@ export function cap(text: string, limit = CAP): string {
 
 /** 模型输出 → 一行 ≤limit 字节：去掉 id+n| 头和围栏，压平换行，超长就在最后一个分隔符处截。 */
 export function cutLine(raw: string, limit = NODE): { line: string; cut: boolean } {
-	let line = flat(raw).trim().replace(/^```[a-z]*\s*|\s*```$/g, "").replace(/^\d+\+\d+\|/, "").trim();
+	let line = flat(raw).trim().replace(/^```[a-z]*\s*|\s*```$/g, "").replace(/^\d+(\+\d+)?\|/, "").trim(); // models echo the line's address, with or without +n
 	if (bytes(line) <= limit) return { line, cut: false };
 	const prefix = Buffer.from(line, "utf8").subarray(0, limit).toString("utf8").replace(/\uFFFD+$/, "");
 	// 先找句/项分隔符，没有再退到逗号；都在前半段以内就硬截。
