@@ -132,7 +132,10 @@ export class View {
 		if (!this.shrinking && this.bytes > this.hi) this.shrinking = true;
 		let changed = false;
 		while (this.shrinking && this.bytes > this.lo) {
-			const j = this.mostDue(T);
+			// Wait for the most due pair rather than merge a less due one in its place: that would coarsen recent lines
+			// for good (merges never undo). Only past twice the budget (a node that keeps failing) take what is built.
+			let j = this.mostDue(T, false);
+			if (j >= 0 && !this.built(this.parentOf(j))) j = this.bytes > 2 * this.hi ? this.mostDue(T, true) : -1;
 			if (j < 0) break;
 			const a = this.parts[j], b = this.parts[j + 1];
 			const parent = { l: a.l + 1, i: a.i / 2 };
@@ -144,13 +147,15 @@ export class View {
 		return changed;
 	}
 
-	/** 最该合并的兄弟对：due = (T - 这对最后一条消息号) / 2^l，严格大于才换，所以相同取最老。 */
-	private mostDue(T: number): number {
+	private parentOf(j: number): Part { const a = this.parts[j]; return { l: a.l + 1, i: a.i / 2 }; }
+
+	/** 最该合并的兄弟对：due = (T - 这对最后一条消息号) / 2^l，严格大于才换，所以相同取最老。onlyBuilt：只在父节点已建的对里挑。 */
+	private mostDue(T: number, onlyBuilt = true): number {
 		let best = -1, bestDue = -Infinity;
 		for (let j = 0; j + 1 < this.parts.length; j++) {
 			const a = this.parts[j], b = this.parts[j + 1];
 			if (a.l !== b.l || a.i % 2 !== 0 || b.i !== a.i + 1) continue;
-			if (!this.built({ l: a.l + 1, i: a.i / 2 })) continue;
+			if (onlyBuilt && !this.built({ l: a.l + 1, i: a.i / 2 })) continue;
 			const due = (T - (end(b) - 1)) / 2 ** a.l;
 			if (due > bestDue) { best = j; bestDue = due; }
 		}

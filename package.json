@@ -30,8 +30,10 @@
 		"dist",
 		"docs",
 		"!docs/upstream",
+		"!docs/img",
 		"scripts",
 		"README.md",
+		"CHANGELOG.md",
 		"LICENSE",
 		"AGENTS.md"
 	],

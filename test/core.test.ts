@@ -63,6 +63,21 @@ describe("View", () => {
 		expect(resent / N).toBeLessThan(3);
 	});
 
+	// 真实重放（700 条，压缩器跟不上）发现：最该合并的老行父节点没建好时，按配方原文会去合并父节点已建好的最近几行，
+	// 于是新的反而变粗、且永远回不来。要等最该合并的那一对，而不是找替身（硬上限之上才退回原文做法）。
+	test("压缩器落后时，批量合并等最该合并的那一对，最近的行保持一条一行", () => {
+		let ready = (p: Part) => p.l <= 1; // leaves and pairs built, nothing higher yet
+		const v = new View(20, 10, () => 1, (p) => ready(p));
+		for (let i = 0; i < 40; i++) { v.append(i); v.fit(i + 1); }
+		expect(v.parts.at(-1)!.l).toBe(0);
+		expect(v.parts.at(-2)!.l).toBe(0);
+		ready = () => true;
+		v.fit(40);
+		expect(v.parts.length).toBeLessThanOrEqual(10);
+		expect(v.tiles(40)).toBe(true);
+		expect(v.parts.at(-1)!.l).toBe(0);
+	});
+
 	test("父节点没建时不合并，等建好再继续缩", () => {
 		const built = new Set<string>();
 		const v = new View(10, 4, () => 1, (p) => built.has(`${p.l}/${p.i}`));
@@ -71,11 +86,17 @@ describe("View", () => {
 		expect(v.shrinking).toBe(true);
 		for (let i = 0; i < 6; i++) built.add(`1/${i}`);
 		v.fit(12);
-		expect(v.parts.length).toBe(6);
+		// merges 0-1 … 6-7, then the most due pair is 0+2|2+2 whose parent 2/0 is not built: it waits there
+		// instead of merging 8-9 and 10-11 in its place (that would coarsen the newest lines for good)
+		expect(v.parts.map((p) => p.l)).toEqual([1, 1, 1, 1, 0, 0, 0, 0]);
 		expect(v.tiles(12)).toBe(true);
 		for (let i = 0; i < 3; i++) built.add(`2/${i}`);
 		v.fit(12);
-		expect(v.parts.length).toBe(4);
+		expect(v.parts.map((p) => p.l)).toEqual([2, 2, 1, 0, 0]); // waiting for 3/0, the newest two untouched
+		expect(v.shrinking).toBe(true);
+		built.add("3/0");
+		v.fit(12);
+		expect(v.parts.map((p) => p.l)).toEqual([3, 1, 0, 0]);
 		expect(v.shrinking).toBe(false);
 	});
 });

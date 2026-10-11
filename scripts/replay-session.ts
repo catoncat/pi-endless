@@ -70,7 +70,7 @@ const levels = new Map<number, number>();
 for (const p of m.view.parts) levels.set(p.l, (levels.get(p.l) ?? 0) + 1);
 const said = m.log.reduce((s, e) => s + e.size, 0);
 console.log(`replayed ${m.T} messages (${(said / 1000).toFixed(0)} KB said) in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
-console.log(`view ${m.view.parts.length} lines, ${(m.view.bytes / 1000).toFixed(0)} KB (peak ${(peak / 1000).toFixed(0)} KB); batch merges ${merges}; lines by level ${[...levels].sort((a, b) => a[0] - b[0]).map(([l, n]) => `${2 ** l}:${n}`).join(" ")}`);
+console.log(`view ${m.view.parts.length} lines, ${(m.view.bytes / 1000).toFixed(0)} KB (peak ${(peak / 1000).toFixed(0)} KB); merge steps ${merges}; lines by level ${[...levels].sort((a, b) => a[0] - b[0]).map(([l, n]) => `${2 ** l}:${n}`).join(" ")}`);
 console.log(`compactor ${target}: ${usage.calls} calls (${usage.failed} failed), ${usage.prompt} prompt tokens (${usage.cached} cached), ${usage.completion} completion, ${(usage.ms / Math.max(1, usage.calls) / 1000).toFixed(1)} s avg`);
 for (const l of [...levels.keys()].sort((a, b) => b - a).slice(0, 3)) {
 	const p = m.view.parts.find((q) => q.l === l)!;
