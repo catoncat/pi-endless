@@ -17,6 +17,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { Memory, PROMPT, CAP, atomicWrite, bytes, cap, flat, start, type Compressor, type Kind } from "./core";
 import { t } from "./i18n";
+import { MemoryMap } from "./map";
 
 const HOME = process.env.MEM_HOME ?? join(homedir(), ".pi", "memory");
 const BINDING = "mem";
@@ -505,7 +506,7 @@ export default function endless(pi: ExtensionAPI) {
 		const b = entry.data;
 		if (!b) return undefined;
 		const box = new Box(1, 0, (s) => theme.bg("customMessageBg", s));
-		const head = `${theme.fg("accent", `📒 ${b.name}`)}${b.readOnly ? theme.fg("warning", t(" read-only", " 只读")) : ""} · ${b.messages} ${t("messages", "条消息")} · ${theme.fg("dim", b.compactor)}`;
+		const head = `${theme.fg("accent", `📒 ${b.name}`)}${b.readOnly ? theme.fg("warning", t(" read-only", " 只读")) : ""} · ${b.messages} ${t("messages", "条消息")}`;
 		box.addChild(new Text(head, 0, 0));
 		if (b.last) {
 			box.addChild(new Text(theme.fg("dim", t("last time:", "上次：")), 0, 0));
@@ -514,24 +515,24 @@ export default function endless(pi: ExtensionAPI) {
 		} else if (!b.messages) box.addChild(new Text(theme.fg("dim", t("new conversation — nothing remembered yet. Say something; everything is kept.", "新对话，还没有记忆。说点什么吧，什么都不会丢。")), 0, 0));
 		if (b.tail.length) {
 			if (expanded) { box.addChild(new Text(theme.fg("dim", t("the newest lines of the view (what the model sees):", "视图最新几行（模型看到的）：")), 0, 0)); for (const l of b.tail) box.addChild(new Text(theme.fg("dim", clip(l, 400)), 0, 0)); }
-			else box.addChild(new Text(theme.fg("dim", t("/mem for status · /mem view for the whole view · ctrl+o shows the newest lines", "/mem 看状态 · /mem view 看整个视图 · ctrl+o 展开最新几行")), 0, 0));
+			else box.addChild(new Text(theme.fg("dim", t("/mem shows the whole conversation · ctrl+o the newest lines", "/mem 看整段对话 · ctrl+o 展开最新几行")), 0, 0));
 		}
 		return box;
 	});
 
 	// ------------------------------------------------------------ /mem
 
-	const USAGE = "/mem open <name> | close | rename <new> | delete <name> | status | view | zoom id+n | search <text> | model | list";
+	const USAGE = "/mem [map] | open <name> | close | rename <new> | delete <name> | status | view | zoom id+n | search <text> | model | list";
 	pi.registerCommand("mem", {
-		description: t("Endless conversation: open <name> | close | rename | delete | status | view | zoom | search | model | list", "长期对话：open <name> | close | rename | delete | status | view | zoom | search | model | list"),
+		description: t("Endless conversation: map | open <name> | close | rename | delete | status | view | zoom | search | model | list", "长期对话：map | open <name> | close | rename | delete | status | view | zoom | search | model | list"),
 		getArgumentCompletions: (prefix) => {
 			const m = /^(open|delete)\s+(\S*)$/.exec(prefix);
 			if (m) return listConversations().filter((n) => n.startsWith(m[2])).map((n) => ({ value: `${m[1]} ${n}`, label: n }));
-			return ["open", "close", "rename", "delete", "status", "view", "zoom", "search", "model", "list"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
+			return ["map", "open", "close", "rename", "delete", "status", "view", "zoom", "search", "model", "list"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
 		},
 		handler: async (args, ctx) => {
 			const [cmd0, ...rest] = args.trim().split(/\s+/);
-			const cmd = cmd0 || (active ? "status" : "open");
+			const cmd = cmd0 || (active ? "map" : "open");
 			const arg = rest.join(" ");
 			try {
 				if (cmd === "open") {
@@ -588,7 +589,11 @@ export default function endless(pi: ExtensionAPI) {
 					ctx.ui.notify(t(`${from} → ${to}. The old name keeps a pointer, so old sessions and --mem ${from} still work.`, `${from} → ${to}。旧名字处留了指针，旧会话和 --mem ${from} 都会跟过来。`), "info");
 					return;
 				}
-				if (cmd === "status") {
+				if (cmd === "map" && ctx.mode === "tui") {
+					await ctx.ui.custom<void>((tui, theme, _kb, done) => new MemoryMap(tui, theme, a.memory, a.name, () => done()));
+					return;
+				}
+				if (cmd === "status" || cmd === "map") {
 					const m = a.memory, u = a.usage;
 					ctx.ui.notify([
 						`mem ${a.name}${a.readOnly ? t(" (read-only)", "（只读）") : ""} · ${a.dir}`,
