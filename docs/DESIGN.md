@@ -1,6 +1,6 @@
 # pi-endless 设计 — 一条永不结束、什么都不丢的聊天
 
-状态：tracer bullet 跑通（2026-10-08）。配方：Taelin 的 OptChat/UniiChat gist v2（2026-10-08 版，原文逐字存于 `docs/upstream/optchat.md`，`node scripts/check-recipe.mjs` 校验同步）。研究与取舍：`~/.pi/optchat-research.md`。
+状态：tracer bullet 跑通（2026-10-08）。配方：Taelin 的 OptChat/UniiChat gist v2（2026-10-08 版，原文由 `node scripts/check-recipe.mjs --write` 逐字放到本地 `docs/upstream/optchat.md`（gist 无许可证，不入库不发包）。
 
 ## 一句话
 

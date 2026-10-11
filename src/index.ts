@@ -131,13 +131,17 @@ export default function endless(pi: ExtensionAPI) {
 
 	// ------------------------------------------------------------ config & compactor
 
-	/** A cheap model the user is logged in to: cheapest by catalog price among haiku/flash/mini/lite-ish ids, else the current model. */
+	/**
+	 * A cheap model the user is logged in to, from the same provider as the chat model when it has one: the whole
+	 * conversation goes to the compactor, so by default it stays with the provider that already sees it. Else the
+	 * cheapest haiku/flash/mini-ish model anywhere, else the chat model itself.
+	 */
 	const pickCompactor = (ctx: ExtensionContext): Compactor => {
 		const cheapish = /haiku|flash|mini|lite|nano|small|fast|turbo/i;
 		const candidates = ctx.modelRegistry.getAvailable().filter((m) => cheapish.test(m.id) && !/vision|embed|image|audio|tts|whisper/i.test(m.id));
 		candidates.sort((a, b) => (a.cost?.input ?? 99) + (a.cost?.output ?? 99) - ((b.cost?.input ?? 99) + (b.cost?.output ?? 99)));
 		const same = ctx.model ? candidates.find((m) => m.provider === ctx.model!.provider) : undefined;
-		const pick = candidates[0] && (candidates[0].cost?.input ?? 99) === 0 ? candidates[0] : same ?? candidates[0];
+		const pick = same ?? candidates[0];
 		if (pick) return { provider: pick.provider, model: pick.id };
 		if (ctx.model) return { provider: ctx.model.provider, model: ctx.model.id };
 		throw new Error(t("No model available for the compactor: log in to a provider, then /mem model", "没有可用的压缩模型：先登录一个 provider，再 /mem model"));
@@ -336,7 +340,9 @@ export default function endless(pi: ExtensionAPI) {
 			if (!create) throw new Error(t(`Conversation ${name} does not exist (${dir})`, `对话 ${name} 不存在（${dir}）`));
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 		}
-		const config = loadConfig(dir, ctx, (c) => ctx.ui.notify(t(`mem: summaries will be written by ${fmtCompactor(c)} (picked automatically: the cheapest model you are logged in to). Change it with /mem model.`, `mem：摘要由 ${fmtCompactor(c)} 来写（自动挑的：你已登录的最便宜模型）。换模型用 /mem model。`), "info"));
+		const config = loadConfig(dir, ctx, (c) => ctx.ui.notify(c.provider === ctx.model?.provider
+			? t(`mem: summaries will be written by ${fmtCompactor(c)}, the cheapest model of the provider you chat with. Change it with /mem model.`, `mem：摘要由 ${fmtCompactor(c)} 来写，是你聊天所用服务商里最便宜的模型。换模型用 /mem model。`)
+			: t(`mem: summaries will be written by ${fmtCompactor(c)}: the conversation is sent to ${c.provider} too. Change it with /mem model.`, `mem：摘要由 ${fmtCompactor(c)} 来写：对话内容也会发给 ${c.provider}。换模型用 /mem model。`), "info"));
 		const warned = new Map<string, number>();
 		const warn = (s: string) => {
 			const k = s.replace(/^mem: compaction \S+ failed: /, ""), now = Date.now();
