@@ -17,7 +17,7 @@
 | `/mem model` | 换压缩模型，新对话也默认用它；首次默认从已登录模型里挑最便宜的 haiku/flash/mini 类 |
 | `/mem rename <新名>` | 改名，旧名留指针文件 `{renamedTo}`，旧会话绑定和 `--mem 旧名` 都跟过来 |
 | `/mem close` | 关掉，回普通 pi |
-| 另一个 pi 再开同一本 | 提示在哪用着：只读打开 / 接管（那边下一次写时降为只读）/ 取消 |
+| 另一个窗口再开同一本 | 什么都不问。在哪个窗口说话对话就跟到哪：新的一轮先读进别的窗口写的；那边正在回答就显示"正在另一个窗口里回答，等它答完就开始…" |
 | 默认不开 | 其他会话（herdr 面板、子代理）一点不变 |
 
 ## 文件
@@ -28,7 +28,7 @@
   tree/YYYY-MM-DD.jsonl       树节点 {l, i, text, size}，每个只建一次
   view.json                   主视图 + 压缩视图（重启不重建，缓存前缀才稳）
   config.json                 {compactor: {provider, model, thinking?, maxTokens?}}
-  lock.json                   {pid, token, session, cwd, at}
+  lock.json                   {pid, token, session, cwd, at, busy, beat}
 ```
 
 kind：`user` / `pi`（回复）/ `tool`（调用）/ `echo`（结果，截头尾 30k 字符）/ `work`（custom 消息：子代理报告、进程通知）/ `note`。思考永不记。
@@ -50,11 +50,11 @@ kind：`user` / `pi`（回复）/ `tool`（调用）/ `echo`（结果，截头�
 - 别的后台记忆扩展（pi-blackhole 及其前身 pi-vcc / pi-observational-memory）在打开的对话里待命：设它们文档里的 passive 环境变量。它们排在前面、在 session_start 里就懒读一次配置，所以必须在会话开始之前决定：启动时从命令行（`--mem`、`--session <文件或 id>`、`--continue`）读出要开的会话文件看有没有绑定；会话切换时在 `session_shutdown` 按目标决定（reload/fork 跟当前、`/mem open` 的 new 开、普通 new 关、resume 看目标文件）。我们设的值带 `PI_ENDLESS_STANDBY` 标记，子代理继承了也不会当成用户自己的设置。效果（rpc 和 herdr 面板实测）：O/P 仪表和 observer 消失，只剩如实反映单次请求大小的 X 仪表。缝：`--resume` 选择器选中的会话启动时无法预知，那一会话里 blackhole 照常跑，下次 /reload 起待命。
 - Anthropic：视图按 4 行一块，倒数第二块打 `cache_control`，去掉 pi 在消息上的标记（4 个上限），请求末自动标记。经 PH 代理实测第二轮 cacheRead 30,956 / 新写 323。
 - 工具是普通（direct）工具，打开对话时 `setActiveTools` 加入，关掉时移除：不开对话的会话里模型看不到它们；三个声明很小且逐字节稳定，不伤缓存，也不依赖 codemode。
-- 只读打开 = `Memory({readOnly})`：不 append、不压缩、不写 view.json（快照）；持有者被接管时 `freeze()`，同样不再写。
+- 写者轮换：同一时刻只有锁的持有者写。打开时若持有者正在一轮中（活着、`busy`、`beat` 3 分钟内），先以只读快照打开，否则直接拿锁。每轮第一次 `context`（`acquire`）：锁不是自己的就等持有者这一轮结束（轮询 0.5 s，Esc 可停），然后拿锁、`freeze()`+关掉旧副本、从磁盘重建 `Memory`（别的窗口写的日志、树、view.json 都读进来），`<previous_exchange>` 在这之后才算。一轮里每 60 s 心跳，`agent_settled` 时 `busy=false`。
 - 关闭时 0 条消息的对话目录直接删（打错名字不留壳）；`/mem delete` 只移到 `.trash/`。
 - `before_agent_start` 用 `customPrompt` 换开头；若更早的扩展返回了 `systemPrompt`（整段钉死），把它文本里的默认开头替换成我们的（不提示：那是别的扩展作者的事）。
 - 卡片是 custom entry（`registerEntryRenderer`），不进模型上下文。界面文案 `t("en","zh")` 跟随 LANG。
-- 锁：写之前核对 `lock.json` 里的 token；被接管就降只读并提示。
+- 丢锁即停笔：`Memory({owns})` 在每次写盘（日志、树节点、view.json）前核对 token，不是自己的就 `freeze()`，在途的摘要丢弃（新写者自己建）。空闲时被拿走不提示（下一轮自动拿回）；只有一轮中途被拿走（心跳停了 3 分钟以上）才提示这一轮剩下的没记上。`/mem delete`、`/mem rename` 遇到别的窗口开着就拒绝并说在哪。
 
 ## 全景图（map.ts，`/mem`）
 

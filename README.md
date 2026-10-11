@@ -37,7 +37,7 @@ or, inside any pi session, `/mem open main`. You get a fresh session bound to th
 | `/mem model` | choose the summarizing model (applies to new conversations too) |
 | `/mem list` | your conversations |
 
-One pi writes a conversation at a time. Opening it from a second pi offers **read-only** (search and zoom on a snapshot, nothing logged, nothing written) or **take over** (the first pi becomes read-only at its next message). A conversation closed with zero messages is removed again, so a mistyped name leaves nothing behind.
+Open the same conversation in as many windows as you like: it follows whichever one you talk in. A turn in another window picks up everything said elsewhere; if the other window is in the middle of answering, the new turn waits until it is done. Nothing is asked and nothing is lost. A conversation closed with zero messages is removed again, so a mistyped name leaves nothing behind.
 
 Data lives in `~/.pi/memory/<name>/` (`MEM_HOME` to change): `main/*.jsonl` the log, `tree/*.jsonl` the summaries, `view.json`, `config.json`. Plain files; back them up like any other.
 
@@ -65,7 +65,7 @@ git clone https://github.com/catoncat/pi-endless && cd pi-endless
 npm ci --ignore-scripts
 npm run check              # types
 bun test                   # view math, persistence, read-only safety, cutting, retries, request prefix stability, map width
-node scripts/smoke.mjs     # end-to-end over `pi --mode rpc`: open, chat, rename, reopen, recall, takeover, delete (needs a model)
+node scripts/smoke.mjs     # end-to-end over `pi --mode rpc`: open, chat, rename, reopen, recall, two windows taking turns, delete (needs a model)
 node scripts/cache-check.mjs [provider/model]   # does a real provider serve the turns from its prompt cache? (a few cents)
 node scripts/check-recipe.mjs   # has the upstream recipe changed since the pinned revision? (the pinned text: docs/upstream/optchat.md)
 pi install .               # try it
@@ -105,6 +105,6 @@ pi --mem main        # 打开（或新建）对话 main；会话里也可 /mem o
 | `/mem model` | 选压缩模型（新对话也默认用它） |
 | `/mem list` | 所有对话 |
 
-同一对话同一时刻只有一个 pi 在写；第二个 pi 打开时可选**只读**（能查不写）或**接管**。数据在 `~/.pi/memory/<名字>/`，纯文本文件。界面语言跟随 `LANG`，或 `MEM_LANG=zh`。
+同一本对话可以在任意多个窗口里开着，在哪个窗口说话它就跟到哪：新的一轮会带上别的窗口里说过的一切；那边正在回答时，这边等它答完再开始。不弹窗、不丢东西。数据在 `~/.pi/memory/<名字>/`，纯文本文件。界面语言跟随 `LANG`，或 `MEM_LANG=zh`。
 
 与配方的差异和原因见 [`docs/recipe.md`](docs/recipe.md)；设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。

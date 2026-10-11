@@ -153,6 +153,29 @@ describe("Memory", () => {
 		rmSync(dir, { recursive: true });
 	});
 
+	// 两个窗口轮流写同一本对话：丢了锁的那个必须在下一次写盘前停笔（日志、树、view.json 都不能再碰）。
+	test("owns 变 false：下一次写之前冻结并通知，之后什么都不写", async () => {
+		const dir = tmp();
+		let mine = true, lost = 0, release: () => void = () => {};
+		const slow = (req: { part: Part }) => new Promise<string>((r) => { release = () => r(`late ${req.part.l}/${req.part.i}`); });
+		const m = new Memory(dir, slow, () => {}, { jobs: 1, owns: () => mine, lost: () => lost++ });
+		m.append("user", "hi");
+		m.append("echo", "x".repeat(900)); // needs the compactor: in flight when the lock moves
+		await new Promise((r) => setTimeout(r, 20));
+		const files = () => ["main", "tree"].flatMap((d) => readdirSync(join(dir, d)).map((f) => `${d}/${f}:${statSync(join(dir, d, f)).size}`)).join(",");
+		const before = files();
+		mine = false;
+		release();
+		await new Promise((r) => setTimeout(r, 20));
+		expect(files()).toBe(before); // the late summary was dropped, not written
+		expect(lost).toBe(1);
+		expect(m.readOnly).toBe(true);
+		expect(() => m.append("user", "nope")).toThrow(/read-only/);
+		await m.close();
+		expect(files()).toBe(before);
+		rmSync(dir, { recursive: true });
+	});
+
 	test("zoom 寻址与 search", async () => {
 		const dir = tmp();
 		const m = new Memory(dir, fakeCompressor, () => {}, { jobs: 2 });

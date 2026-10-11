@@ -69,7 +69,13 @@ const standBy = (on: boolean) => {
 interface Compactor { provider: string; model: string; thinking?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max"; maxTokens?: number }
 interface Config { compactor: Compactor }
 interface Usage { calls: number; input: number; output: number; cacheRead: number; cost: number }
-interface Active { name: string; dir: string; memory: Memory; config: Config; token: string; readOnly: boolean; usage: Usage }
+/**
+ * One pi writes a conversation at a time; the conversation follows whichever window you talk in. A window that is not
+ * the writer takes over at the start of its next turn — at once when the writer is idle, after the writer's turn
+ * otherwise — and reloads what the other window wrote. Nobody is asked anything.
+ */
+interface Lock { pid: number; token: string; session?: string; cwd?: string; at?: string; busy?: boolean; beat?: string }
+interface Active { name: string; dir: string; memory: Memory; config: Config; token: string; writer: boolean; since: string; session: string; cwd: string; warn: (s: string) => void; usage: Usage }
 interface Banner { name: string; readOnly: boolean; messages: number; compactor: string; last?: { user: string; reply: string }; tail: string[] }
 
 // pi instantiates extensions anew for every session (/mem open, /mem close, /resume), so process-wide state lives here.
@@ -79,10 +85,14 @@ if (!(globalThis as { __memStartup?: boolean }).__memStartup) { (globalThis as {
 const lockFile = (dir: string) => join(dir, "lock.json");
 /** MEM_TRACE=<file>: append one line per hook (debugging the turn assembly). MEM_DEBUG=<file>: dump the last provider payload. */
 const trace = (line: string) => { if (process.env.MEM_TRACE) appendFileSync(process.env.MEM_TRACE, `${line}\n`); };
-const readLock = (dir: string): { pid: number; token: string; cwd?: string; at?: string } | undefined => {
+const readLock = (dir: string): Lock | undefined => {
 	try { return JSON.parse(readFileSync(lockFile(dir), "utf8")); } catch { return undefined; }
 };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const BEAT_MS = 60_000, STALE_MS = 3 * 60_000, WAIT_POLL_MS = 500;
+/** Another window is in the middle of a turn: its pi is alive and it beat recently (a long tool call still beats). */
+const answering = (lock: Lock | undefined, token: string) =>
+	!!lock && lock.token !== token && lock.pid !== process.pid && alive(lock.pid) && !!lock.busy && Date.now() - Date.parse(lock.beat ?? lock.at ?? "") < STALE_MS;
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 const fmtCompactor = (c: Compactor) => `${c.provider}/${c.model}${c.thinking ? ` (${c.thinking})` : ""}`;
@@ -108,7 +118,7 @@ export default function endless(pi: ExtensionAPI) {
 		const parts = [`mem ${active.name}`, `${m.T} msgs`];
 		if (m.pending) parts.push(t(`${m.pending} pending`, `${m.pending} 待摘要`));
 		if (m.active) parts.push(t(`${m.active} running`, `${m.active} 压缩中`));
-		if (active.readOnly) parts.push(t("read-only", "只读"));
+		if (!active.writer) parts.push(t("in another window", "在另一个窗口"));
 		if (m.lastError) parts.push(t(`compactor failing: ${clip(flat(m.lastError), 50)}`, `压缩失败: ${clip(flat(m.lastError), 50)}`));
 		ctx.ui.setStatus("mem", parts.join(" · "));
 	};
@@ -221,6 +231,48 @@ export default function endless(pi: ExtensionAPI) {
 		return undefined;
 	};
 
+	let beat: ReturnType<typeof setInterval> | undefined;
+	const writeLock = (a: Active, busy: boolean) => {
+		const now = new Date().toISOString();
+		atomicWrite(lockFile(a.dir), JSON.stringify({ pid: process.pid, token: a.token, session: a.session, cwd: a.cwd, at: a.since, busy, beat: now } satisfies Lock));
+	};
+	/** (Re)load the conversation from disk; a writer checks before every write that the lock is still its own. */
+	const remember = (a: Active, ctx: ExtensionContext, writer: boolean) => {
+		a.writer = writer;
+		a.memory = new Memory(a.dir, compressor(ctx, () => a), a.warn, {
+			readOnly: !writer,
+			owns: () => readLock(a.dir)?.token === a.token,
+			lost: () => { a.writer = false; status(ctx); }, // another window took it while this one was idle: nothing to say, the next turn here takes it back
+		});
+		a.memory.onChange(() => status(ctx));
+	};
+	/** Start of a turn: make this window the writer. Waits while another window is mid-turn, then reloads what it wrote. */
+	const acquire = async (a: Active, ctx: ExtensionContext) => {
+		if (!a.writer || readLock(a.dir)?.token !== a.token) {
+			if (answering(readLock(a.dir), a.token)) {
+				const where = readLock(a.dir)?.cwd;
+				ctx.ui.setWorkingMessage(t(`mem: ${a.name} is answering in another window${where ? ` (${where})` : ""}; this turn starts when it is done…`, `mem：${a.name} 正在另一个窗口${where ? `（${where}）` : ""}里回答，等它答完就开始…`));
+				try { while (answering(readLock(a.dir), a.token) && !ctx.signal?.aborted) await new Promise((r) => setTimeout(r, WAIT_POLL_MS)); } finally { ctx.ui.setWorkingMessage(); }
+				if (ctx.signal?.aborted) return;
+			}
+			a.memory.freeze(); // the old copy stops writing before the fresh one loads
+			await a.memory.close(0);
+			a.since = new Date().toISOString();
+			writeLock(a, true);
+			remember(a, ctx, true);
+			fault = undefined;
+			trace(`acquired ${a.name} T=${a.memory.T}`);
+		} else writeLock(a, true);
+		clearInterval(beat);
+		beat = setInterval(() => { if (active === a && a.writer && readLock(a.dir)?.token === a.token) writeLock(a, true); }, BEAT_MS);
+		beat.unref?.();
+	};
+	const idle = (a: Active) => {
+		clearInterval(beat);
+		beat = undefined;
+		if (a.writer && readLock(a.dir)?.token === a.token) writeLock(a, false);
+	};
+
 	const open = async (rawName: string, ctx: ExtensionContext, create = true): Promise<void> => {
 		if (active) await close();
 		if (!NAME.test(rawName)) throw new Error(t(`Conversation names are letters, digits, . _ - only: ${rawName}`, `对话名只能是字母、数字、._-：${rawName}`));
@@ -230,19 +282,6 @@ export default function endless(pi: ExtensionAPI) {
 			if (!create) throw new Error(t(`Conversation ${name} does not exist (${dir})`, `对话 ${name} 不存在（${dir}）`));
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 		}
-		let readOnly = false;
-		const token = randomUUID();
-		const lock = readLock(dir);
-		if (lock && lock.pid !== process.pid && alive(lock.pid)) {
-			const where = t(`${name} is open in another pi (pid ${lock.pid}${lock.cwd ? ` · ${lock.cwd}` : ""}${lock.at ? ` · since ${lock.at.slice(0, 16)}` : ""})`,
-				`${name} 正在被另一个 pi 用着（pid ${lock.pid}${lock.cwd ? ` · ${lock.cwd}` : ""}${lock.at ? ` · 自 ${lock.at.slice(0, 16)}` : ""}）`);
-			if (!ctx.hasUI) throw new Error(where);
-			const RO = t("Open read-only (search and zoom, nothing logged)", "只读打开（能查不写）"), TAKE = t("Take over (the other pi becomes read-only)", "接管（那边降为只读）"), NO = t("Cancel", "取消");
-			const choice = await ctx.ui.select(where, [RO, TAKE, NO]);
-			if (choice === undefined || choice === NO) throw new Error(t(`${name} not opened`, `没有打开 ${name}`));
-			if (choice === RO) readOnly = true;
-		}
-		if (!readOnly) atomicWrite(lockFile(dir), JSON.stringify({ pid: process.pid, token, session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, at: new Date().toISOString() }));
 		const config = loadConfig(dir, ctx, (c) => ctx.ui.notify(t(`mem: summaries will be written by ${fmtCompactor(c)} (picked automatically: the cheapest model you are logged in to). Change it with /mem model.`, `mem：摘要由 ${fmtCompactor(c)} 来写（自动挑的：你已登录的最便宜模型）。换模型用 /mem model。`), "info"));
 		const warned = new Map<string, number>();
 		const warn = (s: string) => {
@@ -251,20 +290,24 @@ export default function endless(pi: ExtensionAPI) {
 			warned.set(k, now);
 			ctx.ui.notify(s.startsWith("mem: compaction ") ? t(`mem: a summary failed — ${k}`, `mem：摘要失败 — ${k}`) : s, "warning");
 		};
-		const a: Active = { name, dir, config, token, readOnly, memory: undefined as unknown as Memory, usage: { calls: 0, input: 0, output: 0, cacheRead: 0, cost: 0 } };
-		a.memory = new Memory(dir, compressor(ctx, () => a), warn, { readOnly });
+		const a: Active = {
+			name, dir, config, token: randomUUID(), writer: false, since: new Date().toISOString(), session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, warn,
+			memory: undefined as unknown as Memory, usage: { calls: 0, input: 0, output: 0, cacheRead: 0, cost: 0 },
+		};
+		const writer = !answering(readLock(dir), a.token); // in the middle of a turn elsewhere: take over at our first turn
+		if (writer) writeLock(a, false);
+		remember(a, ctx, writer);
 		active = a;
 		fault = undefined;
-		a.memory.onChange(() => status(ctx));
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...TOOLS])]);
 		pi.setSessionName(`mem ${name}`);
 		status(ctx);
 		const banner: Banner = {
-			name, readOnly, messages: a.memory.T, compactor: fmtCompactor(config.compactor), last: lastExchange(a.memory),
+			name, readOnly: !writer, messages: a.memory.T, compactor: fmtCompactor(config.compactor), last: lastExchange(a.memory),
 			tail: a.memory.view.parts.slice(-12).map((p) => a.memory.renderLine(p)),
 		};
 		pi.appendEntry(BANNER, banner);
-		if (ctx.mode !== "tui") ctx.ui.notify(`mem ${name}${readOnly ? " (read-only)" : ""} · ${a.memory.T} messages · ${banner.compactor}`, "info");
+		if (ctx.mode !== "tui") ctx.ui.notify(`mem ${name}${writer ? "" : " (in use in another window)"} · ${a.memory.T} messages · ${banner.compactor}`, "info");
 	};
 
 	const close = async (pruneEmpty = true) => {
@@ -272,8 +315,10 @@ export default function endless(pi: ExtensionAPI) {
 		if (!a) return;
 		active = undefined;
 		try { flush(a); } catch { /* closing anyway */ }
+		clearInterval(beat);
+		beat = undefined;
 		await a.memory.close();
-		if (!a.readOnly && readLock(a.dir)?.token === a.token) {
+		if (a.writer && readLock(a.dir)?.token === a.token) {
 			rmSync(lockFile(a.dir), { force: true });
 			if (pruneEmpty && a.memory.T === 0) rmSync(a.dir, { recursive: true, force: true }); // never used: no reason to keep a mistyped name around
 		}
@@ -306,14 +351,14 @@ export default function endless(pi: ExtensionAPI) {
 		else if (m.role === "custom") add("work", textOf((m as { content: unknown }).content));
 	};
 
-	/** Log this run's messages that are not in the log yet. Losing the lock demotes the session to read-only. */
+	/** Log this run's messages that are not in the log yet. Only the writer logs (see acquire). */
 	const flush = (a: Active) => {
-		if (a.readOnly) { logged = run.length; return; }
+		if (!a.writer) { logged = run.length; return; }
 		while (logged < run.length) {
-			if (readLock(a.dir)?.token !== a.token) {
-				a.readOnly = true;
+			if (readLock(a.dir)?.token !== a.token) { // only when this window stopped beating mid-turn for minutes
+				a.writer = false;
 				a.memory.freeze();
-				fault = t(`${a.name} was taken over by another pi; this session is now read-only`, `${a.name} 被另一个 pi 接管了，本会话降为只读`);
+				fault = t(`${a.name} moved to another window in the middle of this turn; the rest of the turn is not in memory`, `${a.name} 在这一轮中途被另一个窗口拿走了，这一轮剩下的部分没有记进记忆`);
 				logged = run.length;
 				throw new Error(fault);
 			}
@@ -331,11 +376,11 @@ export default function endless(pi: ExtensionAPI) {
 	const startRun = (a: Active) => {
 		try { flush(a); } catch { /* demoted to read-only; carry on */ }
 		run = []; logged = 0; view = undefined; runStarted = true; reviews = 0;
-		prevExchange = previousExchange(a);
+		prevExchange = "";
 	};
 
 	const turnState = (a: Active, ctx: ExtensionContext) =>
-		`<turn>\nnow: ${new Date().toString().slice(0, 33)} · cwd: ${ctx.cwd}${a.readOnly ? " · memory is read-only in this session (nothing said here is logged)" : ""}\n</turn>`;
+		`<turn>\nnow: ${new Date().toString().slice(0, 33)} · cwd: ${ctx.cwd}${a.writer ? "" : " · memory is read-only in this turn (nothing said here is logged)"}\n</turn>`;
 
 	/** Messages for the model: the first one carries [view][previous exchange][turn state], the rest of the run follows as is. */
 	const buildContext = (a: Active, ctx: ExtensionContext): AgentMessage[] => {
@@ -438,6 +483,8 @@ export default function endless(pi: ExtensionAPI) {
 		const a = active;
 		if (!a) return;
 		if (view === undefined) {
+			await acquire(a, ctx);
+			prevExchange = previousExchange(a); // after acquire: the last exchange may have happened in another window
 			const m = a.memory;
 			if (!m.ready) {
 				const show = () => ctx.ui.setWorkingMessage(t(`mem: waiting for ${m.pending} summaries${m.lastError ? ` (failing: ${clip(flat(m.lastError), 80)})` : ""}…`, `mem：等摘要，${m.pending} 条未建${m.lastError ? `（失败：${clip(flat(m.lastError), 80)}）` : ""}…`));
@@ -460,6 +507,7 @@ export default function endless(pi: ExtensionAPI) {
 		if (!active) return;
 		try { flush(active); } catch (e) { ctx.ui.notify(errorText(e), "warning"); }
 		runStarted = false;
+		idle(active);
 		status(ctx);
 	});
 
@@ -539,7 +587,7 @@ export default function endless(pi: ExtensionAPI) {
 		const b = entry.data;
 		if (!b) return undefined;
 		const box = new Box(1, 0, (s) => theme.bg("customMessageBg", s));
-		const head = `${theme.fg("accent", `📒 ${b.name}`)}${b.readOnly ? theme.fg("warning", t(" read-only", " 只读")) : ""} · ${b.messages} ${t("messages", "条消息")}`;
+		const head = `${theme.fg("accent", `📒 ${b.name}`)}${b.readOnly ? theme.fg("dim", t(" · in use in another window", " · 另一个窗口正在用")) : ""} · ${b.messages} ${t("messages", "条消息")}`;
 		box.addChild(new Text(head, 0, 0));
 		if (b.last) {
 			box.addChild(new Text(theme.fg("dim", t("last time:", "上次：")), 0, 0));
@@ -598,7 +646,7 @@ export default function endless(pi: ExtensionAPI) {
 					if (!name || !listConversations().includes(name)) throw new Error(t(`Usage: /mem delete <name> (one of: ${listConversations().join(", ") || "none"})`, `用法：/mem delete <名字>（现有：${listConversations().join(", ") || "无"}）`));
 					if (active?.name === name) throw new Error(t(`${name} is open here: /mem close first`, `${name} 正开着：先 /mem close`));
 					const lock = readLock(join(HOME, name));
-					if (lock && lock.pid !== process.pid && alive(lock.pid)) throw new Error(t(`${name} is open in another pi (pid ${lock.pid})`, `${name} 正被另一个 pi 用着（pid ${lock.pid}）`));
+					if (lock && lock.pid !== process.pid && alive(lock.pid)) throw new Error(t(`${name} is open in another window${lock.cwd ? ` (${lock.cwd})` : ""}: /mem close it there first`, `${name} 正在另一个窗口${lock.cwd ? `（${lock.cwd}）` : ""}开着：先在那边 /mem close`));
 					const msgs = readdirSync(join(HOME, name, "main")).length ? t("has messages", "有消息") : t("is empty", "是空的");
 					if (!(await ctx.ui.confirm(t(`Delete ${name}?`, `删除 ${name}？`), t(`${name} ${msgs}. It moves to ${join(HOME, ".trash")}; nothing is destroyed.`, `${name} ${msgs}。会移到 ${join(HOME, ".trash")}，不会真的销毁。`)))) return;
 					const to = trash(name);
@@ -610,7 +658,7 @@ export default function endless(pi: ExtensionAPI) {
 					const to = arg.trim();
 					if (!NAME.test(to)) throw new Error(t("Usage: /mem rename <new-name>", "用法：/mem rename <新名字>"));
 					if (!ctx.isIdle()) throw new Error(t("Wait for the agent to finish first", "等 agent 停下来再改名"));
-					if (a.readOnly) throw new Error(t("A read-only conversation cannot be renamed here", "只读打开的对话不能改名"));
+					if (!a.writer || readLock(a.dir)?.token !== a.token) throw new Error(t(`${a.name} is in use in another window: rename it there, or say something here first`, `${a.name} 正在另一个窗口用着：去那边改名，或者先在这里说句话`));
 					if (existsSync(join(HOME, to))) throw new Error(t(`${to} already exists`, `${to} 已经存在`));
 					const from = a.name;
 					await close(false);
@@ -628,7 +676,7 @@ export default function endless(pi: ExtensionAPI) {
 				if (cmd === "status" || cmd === "map") {
 					const m = a.memory, u = a.usage;
 					ctx.ui.notify([
-						`mem ${a.name}${a.readOnly ? t(" (read-only)", "（只读）") : ""} · ${a.dir}`,
+						`mem ${a.name}${a.writer ? "" : t(" (in use in another window)", "（另一个窗口在用）")} · ${a.dir}`,
 						t(`messages ${m.T} · tree nodes ${m.tree.size} · owed ${m.owed} (leaves ${m.pending}) · running ${m.active}`, `消息 ${m.T} · 树节点 ${m.tree.size} · 欠 ${m.owed}（叶子 ${m.pending}）· 压缩中 ${m.active}`),
 						t(`view ${m.view.parts.length} lines, ${m.view.bytes} B (compaction view ${m.cview.parts.length} lines, ${m.cview.bytes} B)`, `视图 ${m.view.parts.length} 行 ${m.view.bytes} B（压缩视图 ${m.cview.parts.length} 行 ${m.cview.bytes} B）`),
 						t(`compactor ${fmtCompactor(a.config.compactor)} · this session: ${u.calls} calls, ${u.input + u.cacheRead} in (${u.cacheRead} cached), ${u.output} out, $${u.cost.toFixed(4)}`, `压缩器 ${fmtCompactor(a.config.compactor)} · 本会话 ${u.calls} 次，输入 ${u.input + u.cacheRead}（缓存 ${u.cacheRead}），输出 ${u.output}，$${u.cost.toFixed(4)}`),

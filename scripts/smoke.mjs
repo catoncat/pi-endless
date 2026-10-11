@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // End-to-end smoke test over `pi --mode rpc`: open / chat / status / rename / close / reopen by old name / recall /
-// lock takeover from a second pi / delete to trash / mistyped name pruned. Needs a logged-in pi and a model.
+// a second pi on the same conversation (no question asked; turns alternate and queue) / delete to trash / mistyped name pruned. Needs a logged-in pi and a model.
 //   node scripts/smoke.mjs            (SMOKE_MODEL=provider/id to pick the chat model; MEM_LANG is forced to en)
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -73,6 +73,7 @@ class Pi {
 	async stop() { this.proc.stdin.end(); await new Promise((r) => { this.proc.on("exit", r); setTimeout(r, 20_000); }); }
 }
 
+const logEntries = (name) => { const d = join(MEM_HOME, name, "main"); return existsSync(d) ? readdirSync(d).sort().flatMap((f) => readFileSync(join(d, f), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))) : []; };
 const logCount = (name) => { const d = join(MEM_HOME, name, "main"); return existsSync(d) ? readdirSync(d).reduce((n, f) => n + readFileSync(join(d, f), "utf8").split("\n").filter(Boolean).length, 0) : -1; };
 
 const a = new Pi("A");
@@ -102,18 +103,34 @@ try {
 	const answer = await a.lastText();
 	check("recall across sessions", /5433/.test(answer), answer.trim().slice(0, 60));
 
-	// second pi takes over
+	// a second pi opens the same conversation: nothing is asked, the conversation follows whoever talks
 	const b = new Pi("B");
-	b.answer = (req) => (req.method === "select" ? { value: req.options.find((o) => /Take over/.test(o)) } : undefined);
+	let asked = 0;
+	b.answer = (req) => { if (["select", "confirm", "input"].includes(req.method)) asked++; return undefined; };
 	await new Promise((r) => setTimeout(r, 1500));
+	const before = logCount("smoke2");
 	n = await b.say("/mem open smoke2");
-	check("takeover from a second pi", /mem smoke2/.test(n) && !/read-only/.test(n), n.split("\n")[0]);
-	n = await a.say("Reply with just: ok");
-	check("first pi demoted to read-only", /taken over/.test(n) || /read-only/.test(a.status.get("mem") ?? ""), `${n.split("\n")[0]} | status: ${a.status.get("mem")}`);
+	check("second pi opens without a question", /mem smoke2/.test(n) && asked === 0, `${n.split("\n")[0]} · asked ${asked}`);
+	await b.say("Reply with just the word: orange");
+	check("second pi's turn is logged", logCount("smoke2") >= before + 2, `${before} → ${logCount("smoke2")}`);
+	await a.say("What single word did you reply with in the previous turn? Answer with that word only.");
+	const back = await a.lastText();
+	check("first pi takes it back and sees the second's turn", /orange/i.test(back) && logCount("smoke2") >= before + 4, `${back.trim().slice(0, 40)} · ${logCount("smoke2")} entries`);
+	// a turn started while the other window is mid-turn waits for it instead of interleaving
+	const slow = b.say("Run the bash command `sleep 6; echo slept` and then reply with just: slept");
+	await new Promise((r) => setTimeout(r, 2500));
+	await a.say("Reply with just the word: after");
+	await slow;
+	const log = logEntries("smoke2");
+	const sleptAt = log.findLastIndex((e) => e.kind === "pi" && /slept/i.test(e.text)), afterAt = log.findLastIndex((e) => e.kind === "user" && /word: after/.test(e.text));
+	check("a turn waits for the other window's turn", sleptAt >= 0 && afterAt > sleptAt && log.every((e, k) => e.i === k), `slept@${sleptAt} after@${afterAt} · ${log.length} contiguous`);
 
 	n = await b.say("/mem delete smoke2");
 	check("delete refuses while open", /close first/.test(n), n);
 	await b.say("/mem close");
+	n = await b.say("/mem delete smoke2");
+	check("delete refuses while another window has it", /another window/.test(n) && existsSync(join(MEM_HOME, "smoke2")), n);
+	await a.say("/mem close");
 	b.answer = (req) => (req.method === "confirm" ? { confirmed: true } : undefined);
 	n = await b.say("/mem delete smoke2");
 	const trashed = existsSync(join(MEM_HOME, ".trash")) ? readdirSync(join(MEM_HOME, ".trash")) : [];

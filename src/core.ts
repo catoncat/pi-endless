@@ -185,6 +185,9 @@ export class View {
 export interface MemoryOptions {
 	/** Read but never write: no appends, no compactions, no view.json (a second pi looking at a conversation in use). */
 	readOnly?: boolean;
+	/** Asked before every disk write: does this process still own the conversation? false → freeze, then `lost`. */
+	owns?: () => boolean;
+	lost?: () => void;
 	jobs?: number;
 	retryMs?: number;
 	viewHi?: number;
@@ -211,6 +214,8 @@ export class Memory {
 	private closing = false;
 	private closed = false;
 	readOnly: boolean;
+	private readonly owns?: () => boolean;
+	private readonly lost?: () => void;
 	private readonly jobs: number;
 	private readonly retryMs: number;
 
@@ -223,6 +228,8 @@ export class Memory {
 		this.jobs = opts.jobs ?? JOBS;
 		this.retryMs = opts.retryMs ?? RETRY_MS;
 		this.readOnly = opts.readOnly ?? false;
+		this.owns = opts.owns;
+		this.lost = opts.lost;
 		if (!this.readOnly) for (const sub of ["main", "tree"]) mkdirSync(join(dir, sub), { recursive: true, mode: 0o700 });
 		const sizeOf = (p: Part) => this.tree.get(key(p))?.size ?? PLACEHOLDER_BYTES;
 		const built = (p: Part) => this.tree.has(key(p));
@@ -286,8 +293,15 @@ export class Memory {
 		}
 	}
 
+	/** Another window may have taken the conversation since the last write: check before touching the disk. */
+	private mayWrite(): boolean {
+		if (this.readOnly) return false;
+		if (this.owns && !this.owns()) { this.freeze(); this.lost?.(); return false; }
+		return true;
+	}
+
 	private saveViews(): void {
-		if (this.readOnly) return;
+		if (!this.mayWrite()) return;
 		atomicWrite(join(this.dir, "view.json"), JSON.stringify({
 			view: this.view.parts.map((p) => [p.l, p.i]),
 			cview: this.cview.parts.map((p) => [p.l, p.i]),
@@ -304,7 +318,7 @@ export class Memory {
 
 	append(kind: Kind, text: string, date = new Date().toISOString()): Entry {
 		if (this.closing) throw new Error("mem: memory is closed");
-		if (this.readOnly) throw new Error("mem: memory is read-only");
+		if (!this.mayWrite()) throw new Error("mem: memory is read-only");
 		const entry: Entry = { i: this.log.length, kind, text, size: bytes(`${kind}: ${text}`), date };
 		appendJson(join(this.dir, "main", `${localDay(new Date(date))}.jsonl`), entry);
 		this.log.push(entry);
@@ -475,6 +489,7 @@ export class Memory {
 		if (this.controller.signal.aborted) return;
 		if (!line.trim()) throw new Error("compactor returned an empty line");
 		const node: Node = { l: p.l, i: p.i, text: line, size: bytes(flat(line)) };
+		if (!this.mayWrite()) return; // the window that took over builds its own
 		appendJson(join(this.dir, "tree", `${localDay()}.jsonl`), { l: node.l, i: node.i, text: node.text, size: node.size });
 		this.tree.set(key(p), node);
 		this.retryAt.delete(key(p));
